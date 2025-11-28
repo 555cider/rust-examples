@@ -1,8 +1,35 @@
-debug
-target
+# Rust
+target/
+debug/
 
-.sqlx/
+# Project Data & Logs
 data/
 logs/
+*.log
+*.db
+*.sqlite
 
+# Environment & Secrets
+.env
+.env.*
+
+# IDEs & Editors
 .idea/
+.vscode/
+*.swp
+*.swo
+
+# AI & Tools
+.sqlx/
+.gemini/
+.claude/
+.opencode/
+.github/
+
+# Node / Frontend
+node_modules/
+package-lock.json
+
+# OS Generated
+.DS_Store
+Thumbs.db
