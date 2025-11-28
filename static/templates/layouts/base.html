@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko" class="h-full">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Admin Dashboard{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/vendor/css/fontawesome.min.css">
+    <script src="/static/vendor/js/tailwindcss.js"></script>
+    <link rel="stylesheet" href="/static/css/admin.css?v=1763771000">
+    <script src="/static/vendor/js/sweetalert2.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        gray: {
+                            50: '#fafafa',
+                            100: '#f4f4f5',
+                            200: '#e4e4e7',
+                            300: '#d4d4d8',
+                            400: '#a1a1aa',
+                            500: '#71717a',
+                            600: '#52525b',
+                            700: '#3f3f46',
+                            800: '#27272a',
+                            900: '#18181b',
+                            950: '#09090b',
+                        },
+                        primary: {
+                            50: '#f5f3ff',
+                            100: '#ede9fe',
+                            200: '#ddd6fe',
+                            300: '#c4b5fd',
+                            400: '#a78bfa',
+                            500: '#8b5cf6',
+                            600: '#7c3aed',
+                            700: '#6d28d9',
+                            800: '#5b21b6',
+                            900: '#4c1d95',
+                            950: '#2e1065',
+                        }
+                    },
+                    boxShadow: {
+                        'glass': '0 4px 30px rgba(0, 0, 0, 0.1)',
+                        'glass-sm': '0 2px 10px rgba(0, 0, 0, 0.05)',
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="stylesheet" href="/static/css/admin.css">
+    {% block extra_head %}{% endblock %}
+</head>
+
+<body class="h-full bg-gray-50 text-gray-900 selection:bg-primary-100 selection:text-primary-900">
+    <div class="min-h-full flex flex-col">
+        <!-- Glass Navigation -->
+        <nav class="fixed w-full z-40 glass-dark transition-all duration-300">
+            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+                <div class="flex h-16 items-center justify-between">
+                    <div class="flex items-center gap-8">
+                        <div class="flex-shrink-0 flex items-center gap-3">
+                            <div
+                                class="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-lg shadow-primary-500/30">
+                                <i class="fas fa-shield-alt text-white text-sm"></i>
+                            </div>
+                            <a href="/dashboard"
+                                class="text-white text-lg font-bold tracking-tight hover:text-gray-200 transition-colors">
+                                Admin<span class="text-primary-400">Server</span>
+                            </a>
+                        </div>
+                        {% if true %}
+                        <div class="hidden md:block">
+                            <div class="flex items-baseline space-x-1">
+                                <a href="/dashboard"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'dashboard' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    대시보드
+                                </a>
+                                {% if current_user.role_id == 1 %}
+                                <a href="/users"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'users' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    사용자
+                                </a>
+                                <a href="/roles"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'roles' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    역할
+                                </a>
+                                <a href="/permissions"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'permissions' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    권한
+                                </a>
+                                <a href="/policies"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'policies' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    정책
+                                </a>
+                                <a href="/access-logs"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'access_evaluation_logs' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    접근 로그
+                                </a>
+                                <a href="/access-control/simulator"
+                                    class="nav-link px-3 py-2 text-sm font-medium transition-colors duration-200 {% if active_page == 'simulator' %}text-white active{% else %}text-gray-400 hover:text-white{% endif %}">
+                                    시뮬레이터
+                                </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    <!-- Mobile menu button -->
+                    <div class="-mr-2 flex md:hidden">
+                        <button type="button" id="mobile-menu-button"
+                            class="inline-flex items-center justify-center rounded-lg p-2 text-gray-400 hover:bg-gray-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-gray-800 transition-all"
+                            aria-controls="mobile-menu" aria-expanded="false">
+                            <span class="sr-only">메뉴 열기</span>
+                            <svg id="menu-icon-open" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                                stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                            </svg>
+                            <svg id="menu-icon-close" class="hidden h-6 w-6" fill="none" viewBox="0 0 24 24"
+                                stroke-width="1.5" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="hidden md:block">
+                        <div class="ml-4 flex items-center md:ml-6">
+                            <div class="relative ml-3">
+                                <div>
+                                    <button type="button"
+                                        class="flex max-w-xs items-center gap-2 rounded-full text-sm focus:outline-none transition-opacity hover:opacity-80"
+                                        id="user-menu-button" aria-expanded="false" aria-haspopup="true">
+                                        <span class="sr-only">Open user menu</span>
+                                        <div
+                                            class="h-8 w-8 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center ring-2 ring-white/10 shadow-lg">
+                                            <span class="text-white font-medium text-xs">
+                                                {% if current_user %}{{ current_user.username | truncate(length=1,
+                                                end="") | upper }}{% else %}G{% endif %}
+                                            </span>
+                                        </div>
+                                        <div class="hidden lg:flex flex-col items-start">
+                                            <span class="text-sm font-medium text-gray-200">
+                                                {% if current_user %}{{ current_user.username }}{% else %}Guest{% endif
+                                                %}
+                                            </span>
+                                        </div>
+                                        <i class="fas fa-chevron-down text-xs text-gray-400 ml-1"></i>
+                                    </button>
+                                </div>
+                                <div class="absolute right-0 z-10 mt-2 w-56 origin-top-right rounded-xl bg-white py-2 shadow-xl ring-1 ring-black ring-opacity-5 focus:outline-none hidden transform transition-all duration-200 opacity-0 scale-95"
+                                    role="menu" aria-orientation="vertical" id="user-dropdown">
+                                    {% if current_user %}
+                                    <div class="px-4 py-3 border-b border-gray-100 mb-1">
+                                        <p class="text-sm text-gray-900 font-semibold">내 계정</p>
+                                        <p class="text-xs text-gray-500 truncate">{{ current_user.username }}</p>
+                                    </div>
+                                    <a href="/profile"
+                                        class="group flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-primary-50 hover:text-primary-700 transition-colors"
+                                        role="menuitem">
+                                        <i
+                                            class="fas fa-user-circle mr-3 text-gray-400 group-hover:text-primary-500"></i>프로필
+                                    </a>
+                                    <a href="/history"
+                                        class="group flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-primary-50 hover:text-primary-700 transition-colors"
+                                        role="menuitem">
+                                        <i class="fas fa-history mr-3 text-gray-400 group-hover:text-primary-500"></i>활동
+                                        로그
+                                    </a>
+                                    <a href="/settings"
+                                        class="group flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-primary-50 hover:text-primary-700 transition-colors"
+                                        role="menuitem">
+                                        <i class="fas fa-cog mr-3 text-gray-400 group-hover:text-primary-500"></i>설정
+                                    </a>
+                                    <div class="border-t border-gray-100 my-1"></div>
+                                    <a href="#"
+                                        class="group flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors logout-button"
+                                        role="menuitem" tabindex="-1">
+                                        <i
+                                            class="fas fa-sign-out-alt mr-3 text-red-400 group-hover:text-red-600"></i>로그아웃
+                                    </a>
+                                    {% else %}
+                                    <a href="/auth/login"
+                                        class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                        role="menuitem">로그인</a>
+                                    <a href="/auth/register"
+                                        class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                                        role="menuitem">회원가입</a>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Mobile menu, show/hide based on menu state. -->
+        <div class="md:hidden hidden bg-gray-900 border-b border-gray-800 fixed w-full z-30 top-16" id="mobile-menu">
+            <div class="space-y-1 px-2 pt-2 pb-3 sm:px-3">
+                {% if current_user %}
+                <a href="/dashboard"
+                    class="{% if active_page == 'dashboard' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    대시보드
+                </a>
+                {% if current_user.role_id == 1 %}
+                <a href="/users"
+                    class="{% if active_page == 'users' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    사용자 관리
+                </a>
+                <a href="/roles"
+                    class="{% if active_page == 'roles' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    역할 관리
+                </a>
+                <a href="/permissions"
+                    class="{% if active_page == 'permissions' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    권한 관리
+                </a>
+                <a href="/policies"
+                    class="{% if active_page == 'policies' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    정책 관리
+                </a>
+                <a href="/access-logs"
+                    class="{% if active_page == 'access_evaluation_logs' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    접근 로그
+                </a>
+                <a href="/access-control/simulator"
+                    class="{% if active_page == 'simulator' %}bg-gray-800 text-white{% else %}text-gray-300 hover:bg-gray-800 hover:text-white{% endif %} block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    시뮬레이터
+                </a>
+                {% endif %}
+                {% else %}
+                <a href="/auth/login"
+                    class="text-gray-300 hover:bg-gray-800 hover:text-white block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    로그인
+                </a>
+                <a href="/auth/register"
+                    class="text-gray-300 hover:bg-gray-800 hover:text-white block rounded-md px-3 py-2 text-base font-medium transition-colors">
+                    회원가입
+                </a>
+                {% endif %}
+            </div>
+            {% if current_user %}
+            <div class="border-t border-gray-800 pt-4 pb-3">
+                <div class="flex items-center px-5">
+                    <div
+                        class="h-10 w-10 flex-shrink-0 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-lg">
+                        <span class="text-white font-bold">{{ current_user.username | truncate(length=1, end="") | upper
+                            }}</span>
+                    </div>
+                    <div class="ml-3">
+                        <div class="text-base font-medium text-white">{{ current_user.username }}</div>
+                        <div class="text-sm font-medium text-gray-400">Administrator</div>
+                    </div>
+                </div>
+                <div class="mt-3 space-y-1 px-2">
+                    <a href="/profile"
+                        class="block rounded-md px-3 py-2 text-base font-medium text-gray-400 hover:bg-gray-800 hover:text-white transition-colors">프로필</a>
+                    <a href="#"
+                        class="block px-3 py-2 text-base font-medium text-red-400 hover:bg-gray-800 hover:text-red-300 transition-colors logout-button">
+                        로그아웃
+                    </a>
+                </div>
+            </div>
+            {% else %}
+            <div class="border-t border-gray-800 pt-4 pb-3">
+                <div class="space-y-1 px-2">
+                    <a href="/auth/login"
+                        class="block rounded-md px-3 py-2 text-base font-medium text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">로그인</a>
+                    <a href="/auth/register"
+                        class="block rounded-md px-3 py-2 text-base font-medium text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">회원가입</a>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <main class="flex-grow pt-20 pb-8 px-4 sm:px-6 lg:px-8">
+            <div class="mx-auto max-w-7xl">
+                {% block content %}
+                <!-- Content will be inserted here by child templates -->
+                {% endblock content %}
+            </div>
+        </main>
+    </div>
+
+    <!-- Global Loading Overlay -->
+    <div id="loading-overlay"
+        class="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full mx-4">
+            <div class="flex flex-col items-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary-600 mb-4"></div>
+                <h3 id="loading-title" class="text-lg font-semibold text-gray-900 mb-1">데이터를 불러오는 중</h3>
+                <p id="loading-message" class="text-gray-600 text-center">잠시만 기다려주세요...</p>
+                <div class="mt-4 w-full bg-gray-200 rounded-full h-1.5">
+                    <div class="bg-primary-600 h-1.5 rounded-full animate-pulse" style="width: 45%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 쿠키 조회
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+
+        // 로그아웃 처리
+        function handleLogout(event) {
+            event.preventDefault();
+
+            fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'same-origin'
+            })
+                .then(response => {
+                    if (response.redirected) {
+                        window.location.href = response.url;
+                    } else {
+                        return response.json().then(data => {
+                            if (data.redirect) {
+                                window.location.href = data.redirect;
+                            } else {
+                                window.location.href = '/';
+                            }
+                        });
+                    }
+                })
+                .catch(error => {
+                    console.error('로그아웃 중 오류 발생:', error);
+                    window.location.href = '/';
+                });
+        }
+
+        // Initialize when DOM is loaded
+        document.addEventListener('DOMContentLoaded', function () {
+            // Mobile menu toggle
+            const menuButton = document.getElementById('mobile-menu-button');
+            const menu = document.getElementById('mobile-menu');
+            const menuIcon = document.getElementById('menu-icon-open');
+            const closeIcon = document.getElementById('menu-icon-close');
+            if (menuButton && menu && menuIcon && closeIcon) {
+                menuButton.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const isOpening = menu.classList.toggle('hidden');
+                    menuIcon.classList.toggle('hidden', !isOpening);
+                    closeIcon.classList.toggle('hidden', isOpening);
+                    menuButton.setAttribute('aria-expanded', isOpening);
+                });
+
+                // Close menu when clicking outside
+                document.addEventListener('click', function (e) {
+                    if (!menuButton.contains(e.target) && !menu.contains(e.target)) {
+                        menu.classList.add('hidden');
+                        menuIcon.classList.remove('hidden');
+                        closeIcon.classList.add('hidden');
+                        menuButton.setAttribute('aria-expanded', 'false');
+                    }
+                });
+            }
+
+            // User dropdown toggle
+            const userMenuButton = document.getElementById('user-menu-button');
+            const userMenu = document.getElementById('user-dropdown');
+            if (userMenuButton && userMenu) {
+                userMenuButton.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    const isHidden = userMenu.classList.contains('hidden');
+                    if (isHidden) {
+                        userMenu.classList.remove('hidden');
+                        // Small delay to allow display:block to apply before opacity transition
+                        setTimeout(() => {
+                            userMenu.classList.remove('opacity-0', 'scale-95');
+                            userMenu.classList.add('opacity-100', 'scale-100');
+                        }, 10);
+                    } else {
+                        userMenu.classList.remove('opacity-100', 'scale-100');
+                        userMenu.classList.add('opacity-0', 'scale-95');
+                        setTimeout(() => {
+                            userMenu.classList.add('hidden');
+                        }, 200);
+                    }
+                });
+
+                // Close when clicking outside
+                document.addEventListener('click', function () {
+                    if (!userMenu.classList.contains('hidden')) {
+                        userMenu.classList.remove('opacity-100', 'scale-100');
+                        userMenu.classList.add('opacity-0', 'scale-95');
+                        setTimeout(() => {
+                            userMenu.classList.add('hidden');
+                        }, 200);
+                    }
+                });
+
+                // Prevent dropdown from closing when clicking inside
+                userMenu.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                });
+            }
+
+            const logoutButtons = document.querySelectorAll('.logout-button');
+            logoutButtons
+                .forEach(button => {
+                    button.addEventListener('click', handleLogout);
+                });
+        });
+
+
+    </script>
+
+    <!-- Load utility scripts -->
+    <script src="/static/js/loading.js"></script>
+    <script src="/static/js/error-handler.js"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/api-utils.js"></script>
+    <script src="/static/js/modal.js"></script>
+    <script src="/static/js/table.js"></script>
+    <script src="/static/js/button-feedback.js"></script>
+
+    {% block extra_scripts %}{% endblock %}
+</body>
+
+</html>

@@ -23,7 +23,7 @@ pub fn init_logger(config: &AppConfig) {
         guards.push(guard);
     }
 
-    // Configure file logging with daily rotation
+    // Configure file logging with rotation
     if log_config.file_enable {
         if let Some(parent) = Path::new(&log_config.file_path).parent() {
             if let Err(e) = create_dir_all(parent) {
@@ -31,17 +31,35 @@ pub fn init_logger(config: &AppConfig) {
             }
         }
 
-        match rolling::Builder::new()
-            .rotation(rolling::Rotation::DAILY)
-            .filename_prefix("app")
-            .build(&log_config.file_path)
-        {
+        // Parse rotation strategy from config
+        let rotation = match log_config.file_rotation.to_lowercase().as_str() {
+            "hourly" => rolling::Rotation::HOURLY,
+            "daily" => rolling::Rotation::DAILY,
+            "never" => rolling::Rotation::NEVER,
+            _ => {
+                tracing::warn!(
+                    "알 수 없는 로그 회전 설정: '{}', 기본값 'daily' 사용",
+                    log_config.file_rotation
+                );
+                rolling::Rotation::DAILY
+            }
+        };
+
+        let mut builder = rolling::Builder::new()
+            .rotation(rotation)
+            .filename_prefix("app");
+
+        // Set max files if configured
+        if let Some(max_files) = log_config.file_max_files {
+            builder = builder.max_log_files(max_files);
+        }
+
+        match builder.build(&log_config.file_path) {
             Ok(file_appender) => {
                 let (file_writer, guard) = non_blocking(file_appender);
                 let file_layer = create_file_layer(file_writer, &log_config.file_level);
                 layers.push(Box::new(file_layer));
                 guards.push(guard);
-                tracing::debug!("파일 로거 초기화 완료: {}", log_config.file_path);
             }
             Err(e) => {
                 tracing::error!(
@@ -80,9 +98,13 @@ pub fn init_logger(config: &AppConfig) {
     };
 
     let file_status = if log_config.file_enable {
+        let max_files_info = log_config
+            .file_max_files
+            .map(|n| format!(", 최대파일: {}", n))
+            .unwrap_or_default();
         format!(
-            "활성화 (경로: {}, 레벨: {})",
-            log_config.file_path, log_config.file_level
+            "활성화 (경로: {}, 레벨: {}, 회전: {}{})",
+            log_config.file_path, log_config.file_level, log_config.file_rotation, max_files_info
         )
     } else {
         "비활성화".to_string()

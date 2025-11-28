@@ -1,0 +1,59 @@
+{# Form Textarea Component
+   Usage:
+   {% include "components/form_textarea.html" with 
+      name="description"
+      label="Description"
+      value=""
+      placeholder="Enter description"
+      rows=4
+      required=false
+      disabled=false
+      error=""
+      help="Provide a detailed description"
+   %}
+   
+   Parameters:
+   - name: Textarea name attribute (required)
+   - label: Label text (optional)
+   - value: Textarea value (optional)
+   - placeholder: Placeholder text (optional)
+   - rows: Number of rows (default: 4)
+   - required: boolean (default: false)
+   - disabled: boolean (default: false)
+   - readonly: boolean (default: false)
+   - error: Error message to display (optional)
+   - help: Help text to display (optional)
+   - class: Additional CSS classes for textarea (optional)
+   - maxlength: Maximum character length (optional)
+#}
+
+<div class="form-group">
+    {% if label %}
+        <label for="{{ name }}" class="input-label {% if required %}required{% endif %}">
+            {{ label }}
+            {% if required %}<span class="text-error-500">*</span>{% endif %}
+        </label>
+    {% endif %}
+    
+    <textarea 
+        id="{{ name }}"
+        name="{{ name }}"
+        rows="{{ rows or 4 }}"
+        class="textarea-field {% if error %}error{% endif %} {{ class or "" }}"
+        {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+        {% if required %}required{% endif %}
+        {% if disabled %}disabled{% endif %}
+        {% if readonly %}readonly{% endif %}
+        {% if maxlength %}maxlength="{{ maxlength }}"{% endif %}
+    >{% if value %}{{ value }}{% endif %}</textarea>
+    
+    {% if error %}
+        <p class="input-error">
+            <i class="fas fa-exclamation-circle mr-1"></i>{{ error }}
+        </p>
+    {% endif %}
+    
+    {% if help and not error %}
+        <p class="input-help">{{ help }}</p>
+    {% endif %}
+</div>

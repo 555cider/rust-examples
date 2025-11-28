@@ -1,0 +1,219 @@
+{% extends "layouts/base.html" %}
+
+
+
+{% block title %}ABAC 정책 관리{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <!-- Page Header -->
+    <div class="page-header mb-8">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+                <h1 class="page-title flex items-center gap-2">
+                    ABAC 정책 관리
+                    <span class="badge badge-indigo text-xs align-middle">Attribute-Based</span>
+                </h1>
+                <p class="page-description">속성 기반 접근 제어 정책을 관리합니다</p>
+            </div>
+            <button onclick="openPolicyModal()" class="btn-primary shadow-lg shadow-primary-500/30">
+                <i class="fas fa-plus mr-2"></i>
+                정책 추가
+            </button>
+        </div>
+    </div>
+
+    <!-- Search Box -->
+    <div class="search-box">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+            <div class="md:col-span-6">
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i class="fas fa-search text-gray-400"></i>
+                    </div>
+                    <input type="text" id="search" placeholder="리소스, 액션, 조건으로 검색" class="input-field pl-10">
+                </div>
+            </div>
+            <div class="md:col-span-2">
+                <select id="resource-filter" class="input-field">
+                    <option value="">전체 리소스</option>
+                    <option value="users">사용자</option>
+                    <option value="roles">역할</option>
+                    <option value="permissions">권한</option>
+                    <option value="policies">정책</option>
+                    <option value="access_evaluation_logs">접근 평가 로그</option>
+                </select>
+            </div>
+            <div class="md:col-span-2">
+                <select id="status-filter" class="input-field">
+                    <option value="">전체 상태</option>
+                    <option value="true">활성</option>
+                    <option value="false">비활성</option>
+                </select>
+            </div>
+            <div class="md:col-span-2">
+                <button id="search-button" class="btn-secondary w-full">
+                    <i class="fas fa-search mr-2"></i>
+                    검색
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Table -->
+    <div class="data-table-container">
+        <div class="overflow-x-auto">
+            <table class="data-table w-full">
+                <thead>
+                    <tr>
+                        <th class="table-header-cell">리소스</th>
+                        <th class="table-header-cell text-center">액션</th>
+                        <th class="table-header-cell">정책명</th>
+                        <th class="table-header-cell">주체</th>
+                        <th class="table-header-cell text-center">우선순위</th>
+                        <th class="table-header-cell text-center">상태</th>
+                        <th class="table-header-cell text-center">생성일</th>
+                        <th class="table-header-cell text-right">관리</th>
+                    </tr>
+                </thead>
+                <tbody id="policies-table-body">
+                    <tr>
+                        <td colspan="8" class="loading-state">
+                            <i class="fas fa-spinner fa-spin mr-2"></i>
+                            데이터를 불러오는 중...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination-container">
+        <div class="pagination-info">
+            <span id="pagination-info">총 0개</span>
+        </div>
+        <div class="pagination-buttons" id="pagination-buttons">
+            <!-- Pagination buttons will be inserted here -->
+        </div>
+    </div>
+</div>
+
+<!-- Policy Modal -->
+<div id="policyModal" class="modal">
+    <div class="modal-backdrop" onclick="closePolicyModal()"></div>
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="policyModalTitle" class="modal-title">정책 추가</h3>
+                <button type="button" class="modal-close" onclick="closePolicyModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="policyModalForm">
+                <div class="modal-body">
+                    <input type="hidden" id="policy-id">
+
+                    <div class="form-group mb-4">
+                        <label for="policy-name" class="input-label">정책명 <span class="text-error-600">*</span></label>
+                        <input type="text" id="policy-name" name="name" required class="input-field"
+                            placeholder="예: 주말 접속 제한">
+                        <span id="name-error" class="input-error"></span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="form-group">
+                            <label for="policy-resource" class="input-label">리소스 <span
+                                    class="text-error-600">*</span></label>
+                            <select id="policy-resource" name="resource" required class="input-field">
+                                <option value="">선택하세요</option>
+                                <option value="users">사용자</option>
+                                <option value="permissions">권한</option>
+                                <option value="policies">정책</option>
+                                <option value="access_evaluation_logs">접근 평가 로그</option>
+                                <option value="roles">역할</option>
+                            </select>
+                            <span id="resource-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="policy-action" class="input-label">액션 <span
+                                    class="text-error-600">*</span></label>
+                            <select id="policy-action" name="action" required class="input-field">
+                                <option value="">선택하세요</option>
+                                <option value="read">읽기</option>
+                                <option value="write">쓰기</option>
+                                <option value="delete">삭제</option>
+                                <option value="manage">관리</option>
+                            </select>
+                            <span id="action-error" class="input-error"></span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="policy-condition" class="input-label">조건 필드 <span
+                                class="text-error-600">*</span></label>
+                        <input type="text" id="policy-condition" name="condition" required
+                            placeholder="예: user.department, resource.owner" class="input-field">
+                        <span id="condition-error" class="input-error"></span>
+                        <p class="input-help">평가할 속성 경로를 입력하세요</p>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="form-group">
+                            <label for="policy-operator" class="input-label">연산자 <span
+                                    class="text-error-600">*</span></label>
+                            <select id="policy-operator" name="operator" required class="input-field">
+                                <option value="">선택하세요</option>
+                                <option value="equals">같음 (equals)</option>
+                                <option value="not_equals">같지 않음 (not_equals)</option>
+                                <option value="contains">포함 (contains)</option>
+                                <option value="not_contains">포함하지 않음 (not_contains)</option>
+                                <option value="greater_than">보다 큼 (greater_than)</option>
+                                <option value="less_than">보다 작음 (less_than)</option>
+                            </select>
+                            <span id="operator-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="policy-value" class="input-label">비교 값 <span
+                                    class="text-error-600">*</span></label>
+                            <input type="text" id="policy-value" name="value" required placeholder="예: IT, admin"
+                                class="input-field">
+                            <span id="value-error" class="input-error"></span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="policy-description" class="input-label">설명</label>
+                        <textarea id="policy-description" name="description" rows="3" placeholder="정책에 대한 설명을 입력하세요"
+                            class="textarea-field"></textarea>
+                        <span id="description-error" class="input-error"></span>
+                    </div>
+
+                    <div class="form-group">
+                        <div class="flex items-center">
+                            <input type="checkbox" id="policy-is-active" name="is_active" checked
+                                class="checkbox-field">
+                            <label for="policy-is-active" class="ml-2 text-sm text-gray-900">
+                                정책 활성화
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary" onclick="closePolicyModal()">취소</button>
+                    <button type="submit" class="btn-primary">
+                        <i class="fas fa-save mr-2"></i>
+                        <span id="submit-btn-text">추가</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/policies/list.js"></script>
+{% endblock %}

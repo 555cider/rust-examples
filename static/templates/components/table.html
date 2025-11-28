@@ -1,0 +1,52 @@
+{# Table Component
+   Usage:
+   {% include "components/table.html" with 
+      headers=["Name", "Email", "Role", "Actions"]
+      rows=user_list
+      id="users-table"
+      empty_message="No users found"
+   %}
+   
+   Parameters:
+   - headers: List of header labels (required)
+   - rows: List of row data (required) - each row should be a list of cell values
+   - id: Table ID (optional)
+   - class: Additional CSS classes (optional)
+   - empty_message: Message to display when no rows (default: "No data available")
+   - striped: boolean - alternate row colors (default: false)
+   - hoverable: boolean - highlight row on hover (default: true)
+#}
+
+<div class="table-container">
+    <table class="table {% if striped %}table-striped{% endif %} {{ class or "" }}" {% if id %}id="{{ id }}"{% endif %}>
+        <thead class="table-header">
+            <tr>
+                {% for header in headers %}
+                    <th scope="col" class="table-header-cell">
+                        {{ header }}
+                    </th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody class="table-body">
+            {% if rows and rows|length > 0 %}
+                {% for row in rows %}
+                    <tr class="{% if hoverable or true %}table-row{% endif %}">
+                        {% for cell in row %}
+                            <td class="table-cell">
+                                {{ cell }}
+                            </td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="{{ headers|length }}" class="table-cell text-center text-gray-500">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        {{ empty_message or "No data available" }}
+                    </td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>

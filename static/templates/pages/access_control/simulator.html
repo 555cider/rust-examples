@@ -1,0 +1,179 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}접근 제어 시뮬레이터{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto animate-fade-in">
+    <div class="page-header mb-8">
+        <div>
+            <h1 class="page-title">접근 제어 시뮬레이터</h1>
+            <p class="page-description">사용자, 리소스, 액션을 선택하여 접근 제어 결과를 시뮬레이션합니다.</p>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <!-- Left Column: Input Form -->
+        <div class="lg:col-span-1 space-y-6">
+            <div class="glass-card rounded-2xl shadow-xl p-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4">시뮬레이션 조건</h2>
+                <form id="simulatorForm" class="space-y-4">
+                    <div class="form-group">
+                        <label for="subject" class="input-label">사용자 (Subject) <span
+                                class="text-error-600">*</span></label>
+                        <select id="subject" name="subject" required class="input-field">
+                            <option value="">사용자 선택...</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1" id="selectedUserRole">-</p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="resource" class="input-label">리소스 (Resource) <span
+                                class="text-error-600">*</span></label>
+                        <input type="text" id="resource" name="resource" required class="input-field"
+                            placeholder="예: user, policy, report:123">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="action" class="input-label">액션 (Action) <span
+                                class="text-error-600">*</span></label>
+                        <input type="text" id="action" name="action" required class="input-field"
+                            placeholder="예: read, create, delete">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="input-label mb-2">환경 변수 (Context)</label>
+                        <div id="contextContainer" class="space-y-2 mb-2">
+                            <!-- Dynamic context fields -->
+                        </div>
+                        <button type="button" onclick="addContextField()"
+                            class="text-sm text-primary-600 hover:text-primary-700 font-medium">
+                            <i class="fas fa-plus mr-1"></i> 변수 추가
+                        </button>
+                    </div>
+
+                    <div class="pt-4">
+                        <button type="submit" class="btn-primary w-full justify-center">
+                            <i class="fas fa-play mr-2"></i> 시뮬레이션 실행
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Right Column: Results -->
+        <div class="lg:col-span-2">
+            <div id="resultContainer" class="hidden space-y-6">
+                <!-- Overall Result -->
+                <div class="glass-card rounded-2xl shadow-xl p-6 text-center" id="resultCard">
+                    <h3 class="text-gray-500 font-medium mb-2">접근 제어 결과</h3>
+                    <div class="flex justify-center items-center gap-4">
+                        <div id="resultIcon" class="text-5xl"></div>
+                        <div class="text-left">
+                            <div id="resultText" class="text-3xl font-bold"></div>
+                            <div id="resultTime" class="text-sm text-gray-500 mt-1"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Evaluation Path -->
+                <div class="glass-card rounded-2xl shadow-xl p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-6">평가 경로 (Evaluation Path)</h3>
+                    <div class="relative">
+                        <!-- Connecting Line -->
+                        <div class="absolute left-8 top-0 bottom-0 w-0.5 bg-gray-200"></div>
+
+                        <!-- Step 1: ABAC Deny -->
+                        <div class="relative flex items-start mb-8 group">
+                            <div class="absolute left-0 w-16 flex justify-center">
+                                <div id="step1-icon"
+                                    class="h-8 w-8 rounded-full bg-gray-100 border-2 border-gray-300 flex items-center justify-center z-10">
+                                    <span class="text-sm font-bold text-gray-500">1</span>
+                                </div>
+                            </div>
+                            <div class="ml-20 w-full">
+                                <div
+                                    class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm group-hover:shadow-md transition-shadow">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="font-semibold text-gray-900">ABAC Deny Check</h4>
+                                        <span id="step1-status" class="badge badge-gray">대기중</span>
+                                    </div>
+                                    <p class="text-sm text-gray-600">명시적인 거부 정책이 있는지 확인합니다.</p>
+                                    <div id="step1-details" class="mt-2 text-sm text-gray-500 hidden"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Step 2: RBAC -->
+                        <div class="relative flex items-start mb-8 group">
+                            <div class="absolute left-0 w-16 flex justify-center">
+                                <div id="step2-icon"
+                                    class="h-8 w-8 rounded-full bg-gray-100 border-2 border-gray-300 flex items-center justify-center z-10">
+                                    <span class="text-sm font-bold text-gray-500">2</span>
+                                </div>
+                            </div>
+                            <div class="ml-20 w-full">
+                                <div
+                                    class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm group-hover:shadow-md transition-shadow">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="font-semibold text-gray-900">RBAC Check</h4>
+                                        <span id="step2-status" class="badge badge-gray">대기중</span>
+                                    </div>
+                                    <p class="text-sm text-gray-600">사용자의 역할에 할당된 권한을 확인합니다.</p>
+                                    <div id="step2-details" class="mt-2 text-sm text-gray-500 hidden"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Step 3: ABAC Permit -->
+                        <div class="relative flex items-start group">
+                            <div class="absolute left-0 w-16 flex justify-center">
+                                <div id="step3-icon"
+                                    class="h-8 w-8 rounded-full bg-gray-100 border-2 border-gray-300 flex items-center justify-center z-10">
+                                    <span class="text-sm font-bold text-gray-500">3</span>
+                                </div>
+                            </div>
+                            <div class="ml-20 w-full">
+                                <div
+                                    class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm group-hover:shadow-md transition-shadow">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="font-semibold text-gray-900">ABAC Permit Check</h4>
+                                        <span id="step3-status" class="badge badge-gray">대기중</span>
+                                    </div>
+                                    <p class="text-sm text-gray-600">명시적인 허용 정책이 있는지 확인합니다 (RBAC이 거부된 경우).</p>
+                                    <div id="step3-details" class="mt-2 text-sm text-gray-500 hidden"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- JSON Response -->
+                <div class="glass-card rounded-2xl shadow-xl p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-semibold text-gray-900">상세 응답 (JSON)</h3>
+                        <button onclick="copyJson()" class="text-sm text-primary-600 hover:text-primary-700">
+                            <i class="fas fa-copy mr-1"></i> 복사
+                        </button>
+                    </div>
+                    <pre id="jsonResponse"
+                        class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm font-mono"></pre>
+                </div>
+            </div>
+
+            <!-- Empty State -->
+            <div id="emptyState" class="glass-card rounded-2xl shadow-xl p-12 text-center">
+                <div class="bg-gray-100 rounded-full h-20 w-20 flex items-center justify-center mx-auto mb-4">
+                    <i class="fas fa-flask text-3xl text-gray-400"></i>
+                </div>
+                <h3 class="text-lg font-medium text-gray-900">시뮬레이션 대기중</h3>
+                <p class="text-gray-500 mt-2">왼쪽 폼에서 조건을 입력하고 시뮬레이션을 실행하세요.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+
+<script src="/static/js/access_control/simulator.js"></script>
+{% endblock %}

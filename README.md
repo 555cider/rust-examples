@@ -1,113 +1,269 @@
-# Admin Server
+# Rust Admin Server
 
-관리자 대시보드 서버 (Rust + Axum + Tera)
+**High-performance RBAC/ABAC authentication & authorization service**
 
-## 주요 기능
+Modern admin server with hybrid access control (RBAC + ABAC) built with Rust, Axum, and SQLite.
 
-- JWT 기반 사용자 인증
-- 역할 기반 접근 제어 (RBAC)
-- 관리자 대시보드
-- RESTful API 엔드포인트
-- 데이터베이스 마이그레이션
-- 로깅 및 오류 처리
+---
 
-## 기술 스택
+## 🎯 Key Features
 
-- **백엔드**: Rust + Axum 웹 프레임워크
-- **데이터베이스**: SQLite with SQLx
-- **템플릿 엔진**: Tera
-- **인증**: JWT (JSON Web Tokens)
-- **로깅**: tracing + tracing-subscriber
-- **유효성 검증**: validator
+### Access Control
+- **RBAC (Role-Based Access Control)** - Role and permission management
+- **ABAC (Attribute-Based Access Control)** - Policy-based fine-grained control
+- **Hybrid Mode** - Combine RBAC and ABAC for maximum flexibility
 
-## 시작하기
+### Authentication & Security
+- JWT-based authentication (access + refresh tokens)
+- Password hashing with bcrypt
+- Permission-based authorization
+- Audit logging for all access decisions
 
-### 필수 사항
+### Management Interface
+- Modern responsive web UI (Tailwind CSS)
+- Real-time dashboard with metrics
+- User, role, and permission management
+- Policy management interface
+- Access log viewer
 
-- Rust (최신 안정화 버전)
-- SQLite3
+### Resilience
+- **Circuit Breaker** - Protects the system from failures in downstream services
+- **Request Timeouts** - Prevents long-running requests from degrading system performance
 
-### 설치 및 실행
+---
 
-1. 저장소 클론:
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      Web UI (Tera)                      │
+│              Tailwind CSS + Vanilla JS                  │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│                   Axum Web Server                       │
+│  ┌──────────────┬──────────────┬─────────────────┐    │
+│  │   Auth API   │  Admin API   │  Access Control │    │
+│  │  (JWT/Login) │ (CRUD Users) │   (RBAC/ABAC)   │    │
+│  └──────┬───────┴──────┬───────┴────────┬────────┘    │
+└─────────┼──────────────┼────────────────┼─────────────┘
+          │              │                │
+┌─────────▼──────────────▼────────────────▼─────────────┐
+│              Service Layer (Business Logic)            │
+│   UserService │ RoleService │ PermissionService        │
+│   AuthService │ PolicyService │ AccessControlService   │
+└─────────┬──────────────────────────────────────────────┘
+          │
+┌─────────▼──────────────────────────────────────────────┐
+│          Repository Layer (Data Access)                │
+│   UserRepo │ RoleRepo │ PermissionRepo │ PolicyRepo    │
+└─────────┬──────────────────────────────────────────────┘
+          │
+┌─────────▼──────────────────────────────────────────────┐
+│                  SQLite Database                        │
+│  admin_user │ roles │ permissions │ abac_policy        │
+│  access_evaluation_log │ history                        │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- **Rust** 1.70+ (stable)
+- **SQLite** 3.35+
+- **sqlx-cli** (`cargo install sqlx-cli`)
+
+### Installation
+
+1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd admin-server
+   cd rust-admin-server-dev
    ```
 
-2. 환경 변수 설정:
+2. **Setup environment**
    ```bash
    cp .env.example .env
-   # .env 파일을 수정하여 설정을 변경하세요
+   # Edit .env with your configuration
    ```
 
-3. 데이터베이스 마이그레이션 실행:
+3. **Run database migrations**
    ```bash
    sqlx migrate run
+   # Note: This applies the consolidated schema migration.
    ```
 
-4. 개발 서버 실행:
+4. **Build and run**
    ```bash
-   cargo make --no-workspace start
+   cargo run --release
    ```
 
-## 프로젝트 구조
+5. **Access the application**
+   - Web UI: `http://localhost:3000`
+   - API: `http://localhost:3000/api`
+   - Default credentials: `admin` / (set in first run)
 
+---
+
+## 📚 API Endpoints
+
+### Authentication
 ```
-src/
-├── errors/           # 커스텀 에러 타입 및 처리
-├── filter/           # 미들웨어 및 요청 필터
-├── handler/          # 요청 핸들러
-│   ├── api/         # API 엔드포인트
-│   └── view/        # 뷰 핸들러
-├── model/            # 데이터 모델 및 DTO
-├── repository/       # 데이터베이스 리포지토리
-├── service/          # 비즈니스 로직
-├── util/             # 유틸리티 함수
-└── main.rs           # 애플리케이션 진입점
-```
-
-## 인증 시스템
-
-JWT를 사용한 인증 시스템이 구현되어 있습니다. 인증 미들웨어는 다음과 같이 사용합니다:
-
-```rust
-use axum::middleware;
-
-pub fn route() -> Router<Arc<AppState>> {
-    Router::new()
-        .layer(middleware::from_fn(auth))
-        .route("/", get(handler))
-}
+POST   /api/auth/login          # Login with username/password
+POST   /api/auth/register       # Register new user
+POST   /api/auth/refresh        # Refresh access token
+GET    /api/auth/me             # Get current user info
+POST   /api/auth/logout         # Logout (invalidate token)
 ```
 
-## 환경 변수
-
-`.env` 파일에 다음 변수들을 설정해야 합니다:
-
-```env
-DATABASE_URL=sqlite:./data/db.sqlite
-JWT_SECRET=your_jwt_secret_here
-PORT=3000
+### User Management
+```
+GET    /api/users               # List users (with pagination)
+GET    /api/users/detail?id=x   # Get user by ID
+POST   /api/users               # Create new user
+PUT    /api/users/update?id=x   # Update user
+DELETE /api/users/delete?id=x   # Delete user
 ```
 
-## 개발
+### Role Management
+```
+GET    /api/roles               # List roles
+GET    /api/roles/detail?id=x   # Get role by ID
+POST   /api/roles               # Create new role
+PUT    /api/roles/update?id=x   # Update role
+DELETE /api/roles/delete?id=x   # Delete role
+```
 
-- 테스트 실행:
-  ```bash
-  cargo test
-  ```
+### Permission Management
+```
+GET    /api/permissions               # List permissions
+GET    /api/permissions/detail?id=x   # Get permission by ID
+POST   /api/permissions               # Create permission
+PUT    /api/permissions/update?id=x   # Update permission
+DELETE /api/permissions/delete?id=x   # Delete permission
+```
 
-- 코드 포맷팅:
-  ```bash
-  cargo fmt
-  ```
+### Policy Management (ABAC)
+```
+GET    /api/access-control/policies                # List policies
+GET    /api/access-control/policies/detail?id=x    # Get policy
+POST   /api/access-control/policies                # Create policy
+PUT    /api/access-control/policies/update?id=x    # Update policy
+DELETE /api/access-control/policies/delete?id=x    # Delete policy
+POST   /api/access-control/policies/activate?id=x    # Activate policy
+POST   /api/access-control/policies/deactivate?id=x  # Deactivate policy
+POST   /api/access-control/policies/toggle?id=x      # Toggle policy status
+POST   /api/access-control/policies/validate         # Validate policy JSON
+POST   /api/access-control/policies/test             # Test policy
+```
 
-- 린트 체크:
-  ```bash
-  cargo clippy
-  ```
+### Dashboard & Monitoring
+```
+GET    /api/dashboard           # Dashboard metrics
+GET    /api/history             # Audit log history
+GET    /api/access-logs         # Access evaluation logs
+```
 
-## 라이선스
+**API Documentation**: See [docs/api/](docs/api/) for detailed API specs.
 
-이 프로젝트는 MIT 라이선스 하에 배포됩니다.
+---
+
+## 🛠️ Technology Stack
+
+| Category | Technology |
+|----------|-----------|
+| **Language** | Rust 1.70+ |
+| **Web Framework** | Axum 0.7 |
+| **Database** | SQLite 3.35+ with SQLx 0.8 |
+| **Template Engine** | Tera 1.20 |
+| **Authentication** | JWT (jsonwebtoken 9.3) |
+| **Password Hashing** | Argon2 |
+| **Logging** | tracing + tracing-subscriber |
+| **Validation** | validator 0.20 |
+| **Frontend** | Tailwind CSS 3.x + Vanilla JS |
+| **Resilience** | Custom Circuit Breaker |
+
+---
+
+## 📁 Project Structure
+
+```
+rust-admin-server-dev/
+├── src/
+│   ├── main.rs                  # Application entry point
+│   ├── config/                  # Configuration modules
+│   │   ├── container.rs         # Dependency injection
+│   │   └── security.rs          # Security config
+│   ├── handlers/
+│   │   ├── api/                 # API endpoints
+│   │   │   ├── auth.rs          # Authentication
+│   │   │   ├── user.rs          # User management
+│   │   │   ├── role.rs          # Role management
+│   │   │   ├── permission.rs    # Permission management
+│   │   │   └── access_control/  # ABAC policies
+│   │   └── views/               # HTML page handlers
+│   ├── services/                # Business logic layer
+│   │   ├── auth.rs
+│   │   ├── user.rs
+│   │   ├── role.rs
+│   │   ├── permission.rs
+│   │   └── access_control/      # RBAC/ABAC engines
+│   ├── repositories/            # Data access layer
+│   │   ├── auth.rs
+│   │   ├── user.rs
+│   │   ├── role.rs
+│   │   └── permission.rs
+│   ├── models/                  # Data models
+│   │   ├── entities/            # Database entities
+│   │   └── dto/                 # Data transfer objects
+│   ├── middleware/              # Middleware (auth, etc.)
+│   ├── errors.rs                # Error handling
+│   └── auth/                    # Auth utilities (JWT, password)
+├── migrations/                  # Database migrations
+├── static/                      # Frontend assets
+│   ├── js/                      # JavaScript files
+│   ├── css/                     # Stylesheets
+│   └── templates/               # Tera templates
+└── docs/                        # Documentation
+    ├── architecture.md          # Architecture details
+    ├── operations-guide.md      # Operations guide
+    └── api/                     # API documentation
+```
+
+---
+
+## 🔒 Security
+
+- **Password Hashing**: bcrypt with secure defaults (DEFAULT_COST)
+- **JWT Tokens**: HS256 with configurable expiry
+- **Permission Validation**: Every request is authenticated and authorized
+- **SQL Injection**: Protected by SQLx compile-time checks
+- **Audit Logging**: All authentication and authorization events logged
+
+
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run with logging
+RUST_LOG=debug cargo test
+
+# Run specific test
+cargo test test_name
+```
+
+---
+
+## 📖 Documentation
+
+- **[Architecture Guide](docs/architecture.md)** - System architecture and design
+- **[Operations Guide](docs/operations-guide.md)** - Deployment and operations
+- **[API Documentation](docs/api/)** - Detailed API specifications
+

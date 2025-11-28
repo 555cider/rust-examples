@@ -1,0 +1,70 @@
+{# Form Select Component
+   Usage:
+   {% include "components/form_select.html" with 
+      name="role"
+      label="User Role"
+      options=role_options
+      value=current_role
+      required=true
+      disabled=false
+      error=""
+      help="Select the user's role"
+   %}
+   
+   Parameters:
+   - name: Select name attribute (required)
+   - label: Label text (optional)
+   - options: List of options [{"value": "1", "text": "Option 1"}, ...] (required)
+   - value: Selected value (optional)
+   - required: boolean (default: false)
+   - disabled: boolean (default: false)
+   - error: Error message to display (optional)
+   - help: Help text to display (optional)
+   - class: Additional CSS classes for select (optional)
+   - placeholder: Placeholder option text (optional)
+#}
+
+<div class="form-group">
+    {% if label %}
+        <label for="{{ name }}" class="input-label {% if required %}required{% endif %}">
+            {{ label }}
+            {% if required %}<span class="text-error-500">*</span>{% endif %}
+        </label>
+    {% endif %}
+    
+    <select 
+        id="{{ name }}"
+        name="{{ name }}"
+        class="select-field {% if error %}error{% endif %} {{ class or "" }}"
+        {% if required %}required{% endif %}
+        {% if disabled %}disabled{% endif %}
+    >
+        {% if placeholder %}
+            <option value="">{{ placeholder }}</option>
+        {% endif %}
+        
+        {% for option in options %}
+            {% if option.value %}
+                {% set option_value = option.value %}
+            {% else %}
+                {% set option_value = option.id %}
+            {% endif %}
+            <option
+                value="{{ option_value }}"
+                {% if option_value == value %}selected{% endif %}
+            >
+                {% if option.text %}{{ option.text }}{% else %}{{ option.name }}{% endif %}
+            </option>
+        {% endfor %}
+    </select>
+    
+    {% if error %}
+        <p class="input-error">
+            <i class="fas fa-exclamation-circle mr-1"></i>{{ error }}
+        </p>
+    {% endif %}
+    
+    {% if help and not error %}
+        <p class="input-help">{{ help }}</p>
+    {% endif %}
+</div>

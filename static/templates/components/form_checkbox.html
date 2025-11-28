@@ -1,0 +1,51 @@
+{# Form Checkbox Component
+   Usage:
+   {% include "components/form_checkbox.html" with 
+      name="agree"
+      label="I agree to the terms"
+      checked=false
+      disabled=false
+      error=""
+      help="You must agree to continue"
+   %}
+   
+   Parameters:
+   - name: Checkbox name attribute (required)
+   - label: Label text (required)
+   - checked: boolean (default: false)
+   - disabled: boolean (default: false)
+   - error: Error message to display (optional)
+   - help: Help text to display (optional)
+   - class: Additional CSS classes for checkbox (optional)
+   - value: Checkbox value (default: "on")
+#}
+
+<div class="form-group">
+    <div class="flex items-start">
+        <div class="flex items-center h-5">
+            <input 
+                type="checkbox"
+                id="{{ name }}"
+                name="{{ name }}"
+                value="{{ value or "on" }}"
+                class="checkbox-field {{ class or "" }}"
+                {% if checked %}checked{% endif %}
+                {% if disabled %}disabled{% endif %}
+            />
+        </div>
+        <div class="ml-3">
+            <label for="{{ name }}" class="text-sm font-medium text-gray-700">
+                {{ label }}
+            </label>
+            {% if help and not error %}
+                <p class="input-help mt-0">{{ help }}</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% if error %}
+        <p class="input-error">
+            <i class="fas fa-exclamation-circle mr-1"></i>{{ error }}
+        </p>
+    {% endif %}
+</div>

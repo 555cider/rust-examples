@@ -1,0 +1,218 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto animate-fade-in">
+    <div class="page-header mb-6">
+        <h1 class="page-title">{{ title }}</h1>
+        <p class="page-description">사용자 정보를 입력하세요.</p>
+    </div>
+
+    <div class="glass-card rounded-2xl shadow-xl p-6">
+        <form id="userForm" action="/api/users{% if user %}/{{ user.id }}{% endif %}" method="POST">
+            {% if user %}
+            <input type="hidden" name="_method" value="PUT">
+            <input type="hidden" id="userId" value="{{ user.id }}">
+            {% endif %}
+
+            <div class="form-group">
+                <label for="username" class="input-label">아이디 <span class="text-error-600">*</span></label>
+                <input type="text" id="username" name="username" required class="input-field"
+                    value="{% if user %}{{ user.username }}{% endif %}" {% if user %}disabled{% endif %}>
+            </div>
+
+            <div class="form-group">
+                <label for="name" class="input-label">이름 <span class="text-error-600">*</span></label>
+                <input type="text" id="name" name="name" required class="input-field"
+                    value="{% if user %}{{ user.name }}{% endif %}">
+            </div>
+
+            <div class="form-group">
+                <label for="email" class="input-label">이메일 <span class="text-error-600">*</span></label>
+                <input type="email" id="email" name="email" required class="input-field"
+                    value="{% if user %}{{ user.email }}{% endif %}" {% if user %}disabled{% endif %}>
+            </div>
+
+            <div class="form-group">
+                <label for="phone" class="input-label">전화번호</label>
+                <input type="tel" id="phone" name="phone" class="input-field"
+                    value="{% if user %}{{ user.phone }}{% endif %}">
+            </div>
+
+            <div class="form-group">
+                <label for="roleId" class="input-label">역할 <span class="text-error-600">*</span></label>
+                <select id="roleId" name="role_id" required class="input-field">
+                    <option value="">선택하세요</option>
+                    {% for role in roles %}
+                    <option value="{{ role.id }}" {% if user and user.role_id==role.id %}selected{% endif %}>
+                        {{ role.name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            {% if not user %}
+            <div class="form-group">
+                <label for="password" class="input-label">비밀번호 <span class="text-error-600">*</span></label>
+                <input type="password" id="password" name="password" required class="input-field">
+            </div>
+
+            <div class="form-group">
+                <label for="confirmPassword" class="input-label">비밀번호 확인 <span class="text-error-600">*</span></label>
+                <input type="password" id="confirmPassword" name="confirmPassword" required class="input-field">
+            </div>
+            {% else %}
+            <div class="form-group">
+                <label for="password" class="input-label">비밀번호 변경 (선택사항)</label>
+                <input type="password" id="password" name="password" class="input-field" placeholder="변경하려면 입력하세요">
+            </div>
+            {% endif %}
+
+            <div class="form-group">
+                <label class="input-label mb-2">추가 속성 (ABAC)</label>
+                <div id="attributes-container" class="space-y-2 mb-2">
+                    <!-- Dynamic attribute rows will be added here -->
+                </div>
+                <button type="button" onclick="addAttributeRow()" class="btn-secondary btn-sm w-full">
+                    <i class="fas fa-plus mr-1"></i> 속성 추가
+                </button>
+                <input type="hidden" id="attributes" name="attributes">
+            </div>
+
+            <div class="form-group">
+                <div class="flex items-center">
+                    <input type="checkbox" id="isActive" name="is_active" class="checkbox-field" {% if not user or
+                        user.is_active %}checked{% endif %}>
+                    <label for="isActive" class="ml-2 text-sm text-gray-900">활성 상태</label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="flex items-center">
+                    <input type="checkbox" id="forcePasswordChange" name="force_password_change" class="checkbox-field"
+                        {% if user and user.force_password_change %}checked{% endif %}>
+                    <label for="forcePasswordChange" class="ml-2 text-sm text-gray-900">다음 로그인 시 비밀번호 변경 강제</label>
+                </div>
+            </div>
+
+            <div class="flex justify-end gap-3 mt-6">
+                <a href="/users" class="btn-secondary">취소</a>
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-save mr-2"></i> 저장
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    // Attribute management functions
+    function addAttributeRow(key = '', value = '') {
+        const container = document.getElementById('attributes-container');
+        if (!container) return;
+
+        const rowId = 'attr-' + Date.now() + Math.random().toString(36).substr(2, 9);
+        const row = document.createElement('div');
+        row.className = 'attribute-row flex gap-2 items-start';
+        row.id = rowId;
+
+        row.innerHTML = `
+            <div class="flex-1">
+                <input type="text" class="attr-key input-field text-sm py-1" placeholder="키 (예: department)" value="${key}">
+            </div>
+            <div class="flex-1">
+                <input type="text" class="attr-value input-field text-sm py-1" placeholder="값 (예: IT)" value="${value}">
+            </div>
+            <button type="button" onclick="removeAttributeRow('${rowId}')" class="text-red-500 hover:text-red-700 p-2">
+                <i class="fas fa-trash-alt"></i>
+            </button>
+        `;
+
+        container.appendChild(row);
+    }
+
+    function removeAttributeRow(rowId) {
+        const row = document.getElementById(rowId);
+        if (row) {
+            row.remove();
+        }
+    }
+
+    // Initialize attributes
+    document.addEventListener('DOMContentLoaded', function () {
+        {% if user and user.attributes %}
+        try {
+            const attributes = {{ user.attributes | safe
+        }};
+    const attrObj = typeof attributes === 'string' ? JSON.parse(attributes) : attributes;
+    Object.entries(attrObj).forEach(([key, value]) => {
+        addAttributeRow(key, value);
+    });
+        } catch (e) {
+        console.error('Error parsing attributes:', e);
+    }
+    {% endif %}
+    });
+
+    document.getElementById('userForm').addEventListener('submit', async function (e) {
+        e.preventDefault();
+
+        const formData = new FormData(this);
+        const data = Object.fromEntries(formData.entries());
+
+        // Convert checkbox values
+        data.is_active = document.getElementById('isActive').checked;
+        data.force_password_change = document.getElementById('forcePasswordChange').checked;
+        data.role_id = parseInt(data.role_id);
+
+        // Handle attributes
+        const attributeRows = document.querySelectorAll('.attribute-row');
+        const attributes = {};
+
+        attributeRows.forEach(row => {
+            const keyInput = row.querySelector('.attr-key');
+            const valueInput = row.querySelector('.attr-value');
+
+            const key = keyInput.value.trim();
+            let value = valueInput.value.trim();
+
+            if (key) {
+                if (value === 'true') value = true;
+                else if (value === 'false') value = false;
+                else if (!isNaN(value) && value !== '') value = Number(value);
+
+                attributes[key] = value;
+            }
+        });
+
+        if (Object.keys(attributes).length > 0) {
+            data.attributes = JSON.stringify(attributes);
+        } else {
+            data.attributes = null;
+        }
+
+        if (!data.password) delete data.password;
+        delete data.confirmPassword;
+
+        const userId = document.getElementById('userId')?.value;
+        const method = userId ? 'PUT' : 'POST';
+        // Fix URL to match API
+        const url = userId ? `/api/users/update?id=${userId}` : '/api/users';
+
+        try {
+            await window.apiClient.request({
+                method: method,
+                url: url,
+                data: data
+            });
+            window.location.href = '/users';
+        } catch (error) {
+            console.error(error);
+            alert('Error saving user: ' + (error.response?.data?.message || error.message));
+        }
+    });
+</script>
+{% endblock %}

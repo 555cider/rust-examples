@@ -1,0 +1,178 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}역할 관리{% endblock title %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto animate-fade-in">
+    <div class="page-header mb-8">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+                <h1 class="page-title flex items-center gap-2">
+                    역할 관리
+                    <span class="badge badge-blue text-xs align-middle">Role-Based</span>
+                </h1>
+                <p class="page-description">시스템의 역할(Role)을 정의하고 권한을 할당합니다.</p>
+            </div>
+            <button onclick="openRoleModal()" class="btn-primary shadow-lg shadow-primary-500/30">
+                <i class="fas fa-plus mr-2"></i> 역할 추가
+            </button>
+        </div>
+    </div>
+
+    <div class="glass-card rounded-2xl shadow-xl overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full">
+                <thead>
+                    <tr class="bg-gray-50/50 border-b border-gray-200">
+                        <th scope="col"
+                            class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">코드
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">이름
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">설명
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-4 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                            상태
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">관리
+                        </th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 bg-white/50 backdrop-blur-sm">
+                    {% if not roles or roles | length == 0 %}
+                    <tr>
+                        <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                            <div class="flex flex-col items-center justify-center">
+                                <i class="fas fa-users-slash text-4xl text-gray-300 mb-3"></i>
+                                <p>등록된 역할이 없습니다.</p>
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    {% for role in roles %}
+                    <tr class="hover:bg-primary-50/50 transition-colors">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span
+                                class="font-mono text-sm text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">
+                                {{ role.code | default(value="-") }}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900">{{ role.name | default(value="-") }}
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-500">{{ role.description | default(value="-") }}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-center">
+                            {% if role.is_active %}
+                            <span class="badge badge-success">활성</span>
+                            {% else %}
+                            <span class="badge badge-error">비활성</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            <div class="flex justify-end space-x-3">
+                                <button onclick="editRole({{ role.id | default(value=0) }})"
+                                    class="text-primary-600 hover:text-primary-900 transition-colors" title="수정">
+                                    <i class="fas fa-edit mr-1"></i>수정
+                                </button>
+                                <button onclick="deleteRole({{ role.id | default(value=0) }})"
+                                    class="text-red-500 hover:text-red-700 transition-colors" title="삭제">
+                                    <i class="fas fa-trash-alt mr-1"></i>삭제
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- User Type Modal -->
+    <div id="roleModal" class="modal">
+        <div class="modal-backdrop" onclick="closeRoleModal()"></div>
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modalTitle" class="modal-title">역할 추가</h3>
+                    <button type="button" class="modal-close" onclick="closeRoleModal()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <form id="roleForm">
+                    <div class="modal-body">
+                        <input type="hidden" id="roleId">
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Left Column: Role Info -->
+                            <div class="space-y-4">
+                                <div class="form-group">
+                                    <label for="code" class="input-label">코드 <span
+                                            class="text-error-600">*</span></label>
+                                    <input type="text" id="code" name="code" required class="input-field"
+                                        placeholder="예: admin">
+                                    <span id="code-error" class="input-error"></span>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="name" class="input-label">이름 <span
+                                            class="text-error-600">*</span></label>
+                                    <input type="text" id="name" name="name" required class="input-field"
+                                        placeholder="예: 관리자">
+                                    <span id="name-error" class="input-error"></span>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="description" class="input-label">설명</label>
+                                    <textarea id="description" name="description" rows="3" class="textarea-field"
+                                        placeholder="역할에 대한 설명"></textarea>
+                                    <span id="description-error" class="input-error"></span>
+                                </div>
+
+                                <div class="form-group">
+                                    <div class="flex items-center">
+                                        <input type="checkbox" id="isActive" name="is_active" checked
+                                            class="checkbox-field">
+                                        <label for="isActive" class="ml-2 text-sm text-gray-900">활성 상태</label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right Column: Permissions -->
+                            <div class="space-y-4">
+                                <label class="input-label mb-2">권한 할당</label>
+                                <div class="border border-gray-200 rounded-lg p-4 h-[400px] overflow-y-auto bg-gray-50">
+                                    <div id="permissionsList" class="space-y-2">
+                                        <div class="text-center text-gray-500 py-4">
+                                            <i class="fas fa-spinner fa-spin mr-2"></i> 권한 목록을 불러오는 중...
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn-secondary" onclick="closeRoleModal()">취소</button>
+                        <button type="submit" class="btn-primary">
+                            <i class="fas fa-save mr-2"></i>
+                            <span id="submit-btn-text">추가</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+
+<script src="/static/js/roles/list.js?v=1763769001"></script>
+{% endblock %}

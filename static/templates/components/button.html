@@ -1,0 +1,47 @@
+{# Button Component
+   Usage:
+   {% include "components/button.html" with 
+      text="Click Me"
+      type="primary"
+      size="md"
+      icon="fas fa-plus"
+      onclick="handleClick()"
+      disabled=false
+      form_type="button"
+   %}
+   
+   Parameters:
+   - text: Button text (required)
+   - type: primary|secondary|success|warning|danger|info (default: primary)
+   - size: sm|md|lg (default: md)
+   - icon: Font Awesome icon class (optional)
+   - onclick: JavaScript onclick handler (optional)
+   - disabled: boolean (default: false)
+   - form_type: button|submit|reset (default: button)
+   - href: Link URL for anchor button (optional)
+   - class: Additional CSS classes (optional)
+#}
+
+{% if href %}
+    {# Anchor button #}
+    <a href="{{ href }}" 
+        class="btn btn-{{ type or "primary" }} {% if size == 'sm' %}btn-sm{% elif size == 'lg' %}btn-lg{% endif %} {{ class or "" }}"
+       {% if onclick %}onclick="{{ onclick }}"{% endif %}
+       {% if disabled %}aria-disabled="true" style="pointer-events: none; opacity: 0.5;"{% endif %}>
+        {% if icon %}
+            <i class="{{ icon }} mr-2"></i>
+        {% endif %}
+        {{ text }}
+    </a>
+{% else %}
+    {# Regular button #}
+    <button type="{{ form_type or "button" }}"
+            class="btn btn-{{ type or "primary" }} {% if size == 'sm' %}btn-sm{% elif size == 'lg' %}btn-lg{% endif %} {{ class or "" }}"
+            {% if onclick %}onclick="{{ onclick }}"{% endif %}
+            {% if disabled %}disabled{% endif %}>
+        {% if icon %}
+            <i class="{{ icon }} mr-2"></i>
+        {% endif %}
+        {{ text }}
+    </button>
+{% endif %}

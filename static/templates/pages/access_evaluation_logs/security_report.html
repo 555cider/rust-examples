@@ -1,0 +1,133 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}{{ title }}{% endblock title %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{{ title }}</h1>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Security analysis for the last {{ report_period_days }} days
+            </p>
+        </div>
+        <div class="flex space-x-3">
+            <button onclick="window.print()" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600 transition-colors">
+                <i class="fas fa-print mr-2"></i>Print Report
+            </button>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Total Evaluations</p>
+                    <p class="text-2xl font-bold text-gray-900 dark:text-white mt-1">
+                        {% if metrics %}{{ metrics.total_evaluations }}{% else %}0{% endif %}
+                    </p>
+                </div>
+                <div class="p-3 bg-blue-50 dark:bg-blue-900/30 rounded-lg">
+                    <i class="fas fa-shield-alt text-blue-600 dark:text-blue-400 text-xl"></i>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Denied Attempts</p>
+                    <p class="text-2xl font-bold text-red-600 dark:text-red-400 mt-1">
+                        {{ denied_attempts_count }}
+                    </p>
+                </div>
+                <div class="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg">
+                    <i class="fas fa-ban text-red-600 dark:text-red-400 text-xl"></i>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Suspicious Patterns</p>
+                    <p class="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
+                        {{ suspicious_patterns_count }}
+                    </p>
+                </div>
+                <div class="p-3 bg-amber-50 dark:bg-amber-900/30 rounded-lg">
+                    <i class="fas fa-exclamation-triangle text-amber-600 dark:text-amber-400 text-xl"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recommendations -->
+    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden">
+        <div class="p-6 border-b border-gray-100 dark:border-gray-700">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Security Recommendations</h3>
+        </div>
+        <div class="p-6">
+            {% if recommendations %}
+                <ul class="space-y-4">
+                {% for recommendation in recommendations %}
+                    <li class="flex items-start">
+                        <i class="fas fa-check-circle text-green-500 mt-1 mr-3"></i>
+                        <span class="text-gray-700 dark:text-gray-300">{{ recommendation }}</span>
+                    </li>
+                {% endfor %}
+                </ul>
+            {% else %}
+                <p class="text-gray-500 dark:text-gray-400">No specific recommendations at this time.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Recent Denied Attempts -->
+    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden">
+        <div class="p-6 border-b border-gray-100 dark:border-gray-700">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recent Denied Attempts</h3>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-100 dark:border-gray-700">
+                        <th class="p-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Time</th>
+                        <th class="p-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">User</th>
+                        <th class="p-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Action</th>
+                        <th class="p-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Resource</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                    {% for log in recent_denied_attempts %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                        <td class="p-4 text-sm text-gray-600 dark:text-gray-300">
+                            {{ log.created_at | date(format="%Y-%m-%d %H:%M:%S") }}
+                        </td>
+                        <td class="p-4 text-sm text-gray-900 dark:text-white font-medium">
+                            User #{{ log.user_id }}
+                        </td>
+                        <td class="p-4 text-sm text-gray-600 dark:text-gray-300">
+                            <span class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-xs">
+                                {{ log.action }}
+                            </span>
+                        </td>
+                        <td class="p-4 text-sm text-gray-600 dark:text-gray-300">
+                            {{ log.resource_type }}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="p-8 text-center text-gray-500 dark:text-gray-400">
+                            No denied attempts found in the recent period.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock content %}

@@ -1,0 +1,99 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto animate-fade-in">
+    <div class="page-header mb-8">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+                <h1 class="page-title">Recent History</h1>
+                <p class="page-description">최근 시스템 활동 내역을 확인합니다.</p>
+            </div>
+            <a href="/history" class="btn-secondary">
+                <i class="fas fa-list-ul mr-2"></i> View All History
+            </a>
+        </div>
+    </div>
+
+    <div class="glass-card rounded-2xl shadow-xl overflow-hidden">
+        <div
+            class="px-6 py-4 border-b border-gray-200/50 bg-white/30 backdrop-blur-sm flex justify-between items-center">
+            <h2 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <i class="fas fa-clock text-primary-600"></i> Latest History
+            </h2>
+            <select class="input-field py-1 px-3 text-sm w-40">
+                <option>Last 24 hours</option>
+                <option>Last 7 days</option>
+                <option>Last 30 days</option>
+            </select>
+        </div>
+
+        <div class="divide-y divide-gray-200/50">
+            <!-- History Item 1 -->
+            <div class="p-6 hover:bg-primary-50/30 transition-colors">
+                <div class="flex items-start gap-4">
+                    <div class="flex-shrink-0">
+                        <div
+                            class="w-12 h-12 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 shadow-sm">
+                            <i class="fas fa-user-plus text-lg"></i>
+                        </div>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center justify-between mb-1">
+                            <p class="text-sm font-bold text-gray-900">New user registered</p>
+                            <span class="text-xs text-gray-400 flex items-center gap-1">
+                                <i class="far fa-clock"></i> 2 minutes ago
+                            </span>
+                        </div>
+                        <p class="text-sm text-gray-600 mb-2">
+                            <span class="font-medium text-gray-900">admin@example.com</span> created a new user
+                            <a href="#"
+                                class="text-primary-600 hover:text-primary-700 font-medium hover:underline">johndoe@example.com</a>
+                        </p>
+                        <div class="flex items-center text-xs text-gray-400">
+                            <i class="fas fa-map-marker-alt mr-1"></i> 192.168.1.1
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History Item 2 -->
+            <div class="p-6 hover:bg-primary-50/30 transition-colors">
+                <div class="flex items-start gap-4">
+                    <div class="flex-shrink-0">
+                        <div
+                            class="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center text-green-600 shadow-sm">
+                            <i class="fas fa-edit text-lg"></i>
+                        </div>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center justify-between mb-1">
+                            <p class="text-sm font-bold text-gray-900">Permission updated</p>
+                            <span class="text-xs text-gray-400 flex items-center gap-1">
+                                <i class="far fa-clock"></i> 1 hour ago
+                            </span>
+                        </div>
+                        <p class="text-sm text-gray-600 mb-2">
+                            <span class="font-medium text-gray-900">admin@example.com</span> updated permissions for
+                            <a href="#"
+                                class="text-primary-600 hover:text-primary-700 font-medium hover:underline">Editor
+                                Role</a>
+                        </p>
+                        <div class="flex items-center text-xs text-gray-400">
+                            <i class="fas fa-map-marker-alt mr-1"></i> 192.168.1.1
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-4 border-t border-gray-200/50 bg-gray-50/50 text-center">
+            <a href="/history"
+                class="text-sm font-medium text-primary-600 hover:text-primary-700 transition-colors flex items-center justify-center gap-2">
+                View all history <i class="fas fa-arrow-right"></i>
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
