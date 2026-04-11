@@ -1,18 +1,21 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
-pub fn init_throttle(
-) -> rusqlite::Result<Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>, rusqlite::Error>
-{
+pub type ThrottlePool = Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>;
+
+pub fn init_throttle() -> rusqlite::Result<ThrottlePool, rusqlite::Error> {
+    init_throttle_at("throttle.db")
+}
+
+pub fn init_throttle_at(path: impl AsRef<Path>) -> rusqlite::Result<ThrottlePool, rusqlite::Error> {
     log::info!("Open a throttle DB connection");
-    let throttle_db_path = String::from("throttle.db");
-    let conn_manager: r2d2_sqlite::SqliteConnectionManager =
-        r2d2_sqlite::SqliteConnectionManager::file(throttle_db_path);
-    let conn_pool: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager> =
-        r2d2::Pool::new(conn_manager).expect("Failed to create a DB connection pool");
-    let conn_pool_am: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
-        Arc::new(Mutex::new(conn_pool));
-    let conn: r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager> =
-        conn_pool_am.lock().unwrap().get().unwrap();
+    let conn_manager =
+        r2d2_sqlite::SqliteConnectionManager::file(path.as_ref().to_path_buf());
+    let conn_pool = r2d2::Pool::new(conn_manager).expect("Failed to create a DB connection pool");
+    let conn_pool_am = Arc::new(Mutex::new(conn_pool));
+    let conn = conn_pool_am.lock().unwrap().get().unwrap();
 
     log::info!("Exceute DDL, DML queries for throttling");
     conn.execute_batch(
@@ -39,7 +42,6 @@ pub fn init_throttle(
             , visitor_id INTEGER NOT NULL REFERENCES visitors(id)
             , limit_id INTEGER NOT NULL REFERENCES limits(id)
             , denied INTEGER NOT NULL DEFAULT 0 CHECK ( denied IN (0, 1) )
-            -- set by trigger
             , count INTEGER CHECK ( count >= 0 )
             , resets_at INTEGER CHECK ( resets_at > 1680373723 )
             , UNIQUE (visitor_id, limit_id)
@@ -49,9 +51,9 @@ pub fn init_throttle(
         "INSERT INTO limits (name, maximum, period_minutes)
         VALUES ('send_message', 5, 2);",
         (),
-    )?; // allow 5 messages per 2 minutes
+    )?;
     conn.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS init_visitor_limit_counter
+        "CREATE TRIGGER IF NOT EXISTS init_visitor_limit_counter
             AFTER INSERT ON visitor_limits
                 WHEN (NEW.count IS NULL OR NEW.resets_at IS NULL)
             BEGIN
@@ -64,12 +66,10 @@ pub fn init_throttle(
         CREATE TRIGGER IF NOT EXISTS update_visitor_limit_counter_breaker
             BEFORE INSERT ON visitor_limits
             BEGIN
-                -- trip breaker for non-expired
                 UPDATE visitor_limits
                 SET denied = visitor_limits.count >= (SELECT maximum FROM limits l WHERE l.id = NEW.limit_id)
                 WHERE visitor_limits.visitor_id = NEW.visitor_id
                     AND visitor_limits.limit_id = NEW.limit_id;
-                -- or reset if expired
                 UPDATE visitor_limits
                 SET count = 0
                     , resets_at = unixepoch() + (60 * (SELECT period_minutes FROM limits l WHERE l.id = NEW.limit_id))
@@ -77,7 +77,7 @@ pub fn init_throttle(
                 WHERE visitor_limits.visitor_id = NEW.visitor_id
                     AND visitor_limits.limit_id = NEW.limit_id
                     AND unixepoch() > visitor_limits.resets_at;
-            END;"
+            END;",
     )?;
     conn.execute_batch(
         "insert into visitors(name, created_at)
@@ -136,4 +136,17 @@ pub fn run(
     log::info!("denied = {}", denied);
 
     Ok(hyper::http::StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initializes_named_sqlite_database() {
+        let db_path = std::env::temp_dir().join(format!("throttle-{}.db", fastrand::u64(..)));
+        let pool = init_throttle_at(&db_path).expect("throttle db should initialize");
+        assert!(pool.lock().unwrap().get().is_ok());
+        std::fs::remove_file(db_path).ok();
+    }
 }
