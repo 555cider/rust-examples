@@ -84,4 +84,20 @@ route:
 
         assert!(config.is_err());
     }
+
+    #[test]
+    fn rejects_missing_protocol() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+route:
+  - scheme: http
+    authority:
+      host: 127.0.0.1
+      port: 8001
+    path: /
+"#,
+        );
+
+        assert!(config.is_err());
+    }
 }
