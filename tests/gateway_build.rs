@@ -463,6 +463,35 @@ async fn supports_http1_gateway_to_https_upstream() {
 }
 
 #[tokio::test]
+async fn returns_bad_gateway_when_upstream_connect_fails() {
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("probe listener");
+    let unused_port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "127.0.0.1".to_string(),
+                port: unused_port.to_string(),
+            },
+            tls: config::RouteTlsConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(body.is_empty());
+    gateway.finish().await;
+}
+
+#[tokio::test]
 async fn supports_h2c_gateway_to_h2c_upstream() {
     let upstream = spawn_h2c_upstream().await;
     let gateway = spawn_gateway_once(

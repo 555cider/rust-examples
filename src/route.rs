@@ -34,8 +34,13 @@ pub async fn run(
                 );
             }
 
-            match route_request(incoming_request, &route_config_arr) {
+            let response = match route_request(incoming_request, &route_config_arr) {
                 Ok(routed) => upstream::send(routed).await,
+                Err(err) => Err(err),
+            };
+
+            match response {
+                Ok(response) => Ok(response),
                 Err(err) => match gateway_response_for_error(&err) {
                     Some(response) => Ok(response),
                     None => Err(err),
@@ -53,12 +58,15 @@ pub async fn run(
 pub fn gateway_response_for_error(
     error: &entity::GatewayError,
 ) -> Option<Response<entity::GatewayBody>> {
-    match error {
-        entity::GatewayError::RouteNotFound(_) => Some(entity::get_gateway_response(
-            hyper::http::StatusCode::NOT_FOUND,
-        )),
-        _ => None,
-    }
+    let status = match error {
+        entity::GatewayError::RouteNotFound(_) => hyper::http::StatusCode::NOT_FOUND,
+        entity::GatewayError::Hyper(_)
+        | entity::GatewayError::Io(_)
+        | entity::GatewayError::Http(_)
+        | entity::GatewayError::InvalidRouteConfig(_) => hyper::http::StatusCode::BAD_GATEWAY,
+    };
+
+    Some(entity::get_gateway_response(status))
 }
 
 pub fn resolve_route(
