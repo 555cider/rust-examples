@@ -24,6 +24,29 @@ fn assert_temp_db_artifacts_removed(db_path: &PathBuf) {
     }
 }
 
+fn wait_for_temp_db_artifacts_removed(db_path: &PathBuf) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if [
+            db_path.clone(),
+            PathBuf::from(format!("{}-journal", db_path.display())),
+            PathBuf::from(format!("{}-shm", db_path.display())),
+            PathBuf::from(format!("{}-wal", db_path.display())),
+        ]
+        .iter()
+        .all(|path| !path.exists())
+        {
+            return;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            assert_temp_db_artifacts_removed(db_path);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn cleanup_temp_db_artifacts(db_path: &PathBuf) -> std::io::Result<()> {
     for path in [
         db_path.clone(),
@@ -41,6 +64,18 @@ fn cleanup_temp_db_artifacts(db_path: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
+fn cleanup_temp_db_artifacts_with_retry(db_path: &PathBuf) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+
+    loop {
+        match cleanup_temp_db_artifacts(db_path) {
+            Ok(()) => return Ok(()),
+            Err(err) if std::time::Instant::now() >= deadline => return Err(err),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+}
+
 struct TempDbGuard {
     db_path: PathBuf,
 }
@@ -52,6 +87,10 @@ impl TempDbGuard {
 
     fn path(&self) -> &PathBuf {
         &self.db_path
+    }
+
+    fn cleanup_with_retry(&self) -> std::io::Result<()> {
+        cleanup_temp_db_artifacts_with_retry(&self.db_path)
     }
 }
 
@@ -83,7 +122,7 @@ impl SpawnedUpstream {
 
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
-        let _ = cleanup_temp_db_artifacts(&self.db_path);
+        let _ = self.cleanup_with_retry();
     }
 }
 
@@ -92,6 +131,8 @@ impl Drop for SpawnedGateway {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+
+        let _ = self.db_guard.cleanup_with_retry();
     }
 }
 
@@ -380,4 +421,31 @@ fn temp_db_guard_removes_artifacts_during_panic_unwind() {
 
     assert!(unwind.is_err());
     assert_temp_db_artifacts_removed(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
+    let upstream = spawn_http1_upstream().await;
+    let db_path = temp_db_path();
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            path: "/".to_string(),
+        },
+        db_path.clone(),
+    )
+    .await;
+
+    let stream = tokio::net::TcpStream::connect(gateway.addr).await.unwrap();
+    tokio::task::yield_now().await;
+    drop(gateway);
+    drop(stream);
+
+    wait_for_temp_db_artifacts_removed(&db_path);
+    drop(upstream);
 }
