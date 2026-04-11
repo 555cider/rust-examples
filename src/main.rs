@@ -31,16 +31,17 @@ async fn main() {
 
     log::info!("Listening on http://{}", &gateway_addr);
     loop {
-        tokio::task::spawn({
-            let (gateway_stream, _) = gateway_listener
-                .accept()
-                .await
-                .expect("Failed to accepts a connection from this listener!");
-            route::run(
-                gateway_stream,
-                route_config_arr.clone(),
-                throttle_pool.clone(),
-            )
+        let (gateway_stream, _) = gateway_listener
+            .accept()
+            .await
+            .expect("Failed to accepts a connection from this listener!");
+        let route_config_arr = route_config_arr.clone();
+        let throttle_pool = throttle_pool.clone();
+
+        tokio::task::spawn(async move {
+            if let Err(err) = route::run(gateway_stream, route_config_arr, throttle_pool).await {
+                log::error!("Gateway connection failed: {:?}", err);
+            }
         });
     }
 }

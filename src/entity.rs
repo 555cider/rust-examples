@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fmt::{Display, Formatter},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -20,21 +21,66 @@ impl hyper::body::Body for GatewayBody {
     ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         match &mut *self.get_mut() {
             Self::Empty => Poll::Ready(None),
-            Self::Incoming(incoming) => Pin::new(incoming)
-                .poll_frame(cx)
-                .map_err(GatewayError::from),
+            Self::Incoming(incoming) => match Pin::new(incoming).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => Poll::Ready(Some(Ok(frame))),
+                Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(GatewayError::from(err)))),
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 }
 
-pub type GatewayError = Box<dyn Error + Send + Sync + 'static>;
+#[derive(Debug)]
+pub enum GatewayError {
+    Hyper(hyper::Error),
+    Io(std::io::Error),
+    Http(hyper::http::Error),
+}
 
-pub fn get_gateway_response(
-    status_code: http::StatusCode,
-) -> Result<http::Response<GatewayBody>, http::Error> {
-    let response: Result<http::Response<GatewayBody>, http::Error> = http::Response::builder()
+impl Display for GatewayError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hyper(err) => write!(f, "hyper error: {}", err),
+            Self::Io(err) => write!(f, "io error: {}", err),
+            Self::Http(err) => write!(f, "http error: {}", err),
+        }
+    }
+}
+
+impl Error for GatewayError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Hyper(err) => Some(err),
+            Self::Io(err) => Some(err),
+            Self::Http(err) => Some(err),
+        }
+    }
+}
+
+impl From<hyper::Error> for GatewayError {
+    fn from(value: hyper::Error) -> Self {
+        Self::Hyper(value)
+    }
+}
+
+impl From<std::io::Error> for GatewayError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<hyper::http::Error> for GatewayError {
+    fn from(value: hyper::http::Error) -> Self {
+        Self::Http(value)
+    }
+}
+
+pub fn get_gateway_response(status_code: hyper::http::StatusCode) -> hyper::Response<GatewayBody> {
+    let response = hyper::Response::builder()
         .status(status_code)
-        .body(GatewayBody::Empty);
+        .body(GatewayBody::Empty)
+        .expect("Failed to build gateway response");
     log::info!("response = {:?}", response);
     response
 }

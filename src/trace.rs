@@ -10,22 +10,6 @@ pub struct Traceparent {
 }
 
 impl Traceparent {
-    pub fn version(&self) -> u8 {
-        self.version
-    }
-
-    pub fn trace_id(&self) -> u128 {
-        self.trace_id
-    }
-
-    pub fn parent_id(&self) -> u64 {
-        self.parent_id
-    }
-
-    pub fn trace_flags(&self) -> u8 {
-        self.trace_flags
-    }
-
     pub fn child(&self, sampled: bool) -> Traceparent {
         Traceparent {
             version: self.version,
@@ -46,8 +30,8 @@ impl Traceparent {
         )
     }
 
-    pub fn as_headervalue(&self) -> http::HeaderValue {
-        http::HeaderValue::from_str(self.as_string().as_str())
+    pub fn as_headervalue(&self) -> hyper::header::HeaderValue {
+        hyper::header::HeaderValue::from_str(self.as_string().as_str())
             .expect("Failed to convert traceparent into header value!")
     }
 }
@@ -77,7 +61,7 @@ pub fn new() -> Traceparent {
     }
 }
 
-pub fn extract(headers: &http::HeaderMap) -> Result<Traceparent, std::num::ParseIntError> {
+pub fn extract(headers: &hyper::HeaderMap) -> Result<Traceparent, std::num::ParseIntError> {
     if headers.get("tracestate").is_none() {
         return Ok(new());
     }

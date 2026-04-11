@@ -90,11 +90,11 @@ pub fn init_throttle(
 pub fn run(
     throttle_conn: &r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>,
     headers: &hyper::HeaderMap,
-) -> Result<http::StatusCode, rusqlite::Error> {
-    let api_key: Option<&http::HeaderValue> = headers.get("api-key");
+) -> Result<hyper::http::StatusCode, rusqlite::Error> {
+    let api_key: Option<&hyper::header::HeaderValue> = headers.get("api-key");
     if api_key.is_none() {
         log::error!("api-key in header is required");
-        return Ok(http::StatusCode::BAD_REQUEST);
+        return Ok(hyper::http::StatusCode::BAD_REQUEST);
     }
     let api_key: &str = api_key.unwrap().to_str().unwrap();
 
@@ -107,7 +107,7 @@ pub fn run(
         .unwrap();
     if has_visitor == 0 {
         log::error!("Thers is no such visitor: {}", api_key);
-        return Ok(http::StatusCode::UNAUTHORIZED);
+        return Ok(hyper::http::StatusCode::UNAUTHORIZED);
     }
     log::info!("has_visitor = {}", has_visitor);
 
@@ -131,9 +131,9 @@ pub fn run(
 
     if denied == 1 {
         log::error!("denied = {}", denied);
-        return Ok(http::StatusCode::TOO_MANY_REQUESTS);
+        return Ok(hyper::http::StatusCode::TOO_MANY_REQUESTS);
     }
     log::info!("denied = {}", denied);
 
-    Ok(http::StatusCode::OK)
+    Ok(hyper::http::StatusCode::OK)
 }
