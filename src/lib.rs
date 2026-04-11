@@ -1,3 +1,4 @@
+pub mod connector;
 pub mod config;
 pub mod entity;
 pub mod logger;

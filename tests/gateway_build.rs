@@ -337,6 +337,30 @@ async fn supports_http1_gateway_to_http1_upstream() {
 }
 
 #[tokio::test]
+async fn supports_http1_gateway_to_http1_hostname_upstream() {
+    let upstream = spawn_http1_upstream().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "localhost".to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"http1"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
 async fn supports_h2c_gateway_to_h2c_upstream() {
     let upstream = spawn_h2c_upstream().await;
     let gateway = spawn_gateway_once(

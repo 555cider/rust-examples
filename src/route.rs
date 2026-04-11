@@ -92,8 +92,7 @@ pub fn route_request(
     let request = build_request(incoming_request, &route_config)?;
 
     Ok(upstream::RoutedRequest {
-        addr: upstream::route_addr(&route_config)?,
-        protocol: route_config.protocol.clone(),
+        route: route_config,
         request,
     })
 }
