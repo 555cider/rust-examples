@@ -18,6 +18,9 @@ pub async fn send(
         connector::UpstreamStream::Plain(stream) => {
             send_on_io(TokioIo::new(stream), protocol, routed.request).await
         }
+        connector::UpstreamStream::Tls(stream) => {
+            send_on_io(TokioIo::new(stream), protocol, routed.request).await
+        }
     }
 }
 

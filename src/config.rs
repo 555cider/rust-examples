@@ -35,6 +35,8 @@ pub struct Route {
     pub scheme: String,
     pub protocol: Protocol,
     pub authority: Authority,
+    #[serde(default)]
+    pub tls: RouteTlsConfig,
     pub path: String,
 }
 
@@ -42,6 +44,12 @@ pub struct Route {
 pub struct Authority {
     pub host: String,
     pub port: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct RouteTlsConfig {
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
 }
 
 fn default_listen_addr() -> String {
@@ -175,6 +183,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8001".to_string(),
                 },
+                tls: RouteTlsConfig::default(),
                 path: "/".to_string(),
             },
             Route {
@@ -184,6 +193,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8002".to_string(),
                 },
+                tls: RouteTlsConfig::default(),
                 path: "/h2".to_string(),
             },
         ]);

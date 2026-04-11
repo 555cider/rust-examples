@@ -19,6 +19,11 @@ chrono = "0.4.26"
 serde = { version = "1.0.163", features = ["derive", "rc"] }
 serde_yaml = "0.9.21"
 fastrand = "2.0.0"
+rustls = "0.23"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.2"
+webpki-roots = "0.26.8"
 
 [dev-dependencies]
 http-body-util = "0.1"
+rcgen = "0.13.2"

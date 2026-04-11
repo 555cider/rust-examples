@@ -163,7 +163,7 @@ pub fn upstream_authority(route_config: &config::Route) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Authority, Protocol, Route};
+    use crate::config::{Authority, Protocol, Route, RouteTlsConfig};
     use hyper::http::StatusCode;
 
     fn sample_route(protocol: Protocol) -> Route {
@@ -174,6 +174,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            tls: RouteTlsConfig::default(),
             path: "/".to_string(),
         }
     }
@@ -197,6 +198,7 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            tls: RouteTlsConfig::default(),
             path: "/".to_string(),
         };
 
@@ -237,6 +239,7 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            tls: RouteTlsConfig::default(),
             path: "/".to_string(),
         };
 

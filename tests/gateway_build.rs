@@ -2,6 +2,7 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::{body::Bytes, Request, Response, StatusCode};
 use hyper_gateway::{config, config::Protocol, entity, logger, route, throttle, trace};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -117,6 +118,12 @@ struct SpawnedUpstream {
     task: Option<JoinHandle<()>>,
 }
 
+struct TlsFixture {
+    cert_path: PathBuf,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+}
+
 impl SpawnedUpstream {
     async fn finish(mut self) {
         self.task.take().unwrap().await.unwrap();
@@ -144,6 +151,12 @@ impl Drop for SpawnedUpstream {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+    }
+}
+
+impl Drop for TlsFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.cert_path);
     }
 }
 
@@ -263,6 +276,65 @@ async fn spawn_h2c_upstream() -> SpawnedUpstream {
     }
 }
 
+fn create_localhost_tls_fixture() -> TlsFixture {
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("localhost certificate");
+    let cert_der = certified.cert.der().to_vec();
+    let key_der = certified.key_pair.serialize_der();
+    let cert_path = std::env::temp_dir().join(format!("gateway-test-cert-{}.der", fastrand::u64(..)));
+    std::fs::write(&cert_path, &cert_der).expect("write test cert");
+
+    TlsFixture {
+        cert_path,
+        cert_der,
+        key_der,
+    }
+}
+
+async fn spawn_https_http1_upstream(fixture: &TlsFixture) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let certs = vec![CertificateDer::from(fixture.cert_der.clone())];
+    let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(fixture.key_der.clone()));
+    let tls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("server config");
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = tls_acceptor.accept(stream).await.unwrap();
+        let service =
+            hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                let status = if request.headers().contains_key("traceparent") {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(status)
+                        .body(Full::new(Bytes::from_static(b"https-http1")))
+                        .unwrap(),
+                )
+            });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .unwrap();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn send_http1_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
@@ -323,6 +395,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -347,6 +420,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -356,6 +430,34 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
     let (status, body) = send_http1_request(gateway.addr).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"http1"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn supports_http1_gateway_to_https_upstream() {
+    let tls_fixture = create_localhost_tls_fixture();
+    let upstream = spawn_https_http1_upstream(&tls_fixture).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "https".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "localhost".to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            tls: config::RouteTlsConfig {
+                ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
+            },
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"https-http1"));
     gateway.finish().await;
     upstream.finish().await;
 }
@@ -371,6 +473,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -395,6 +498,7 @@ async fn supports_h2c_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -419,6 +523,7 @@ async fn supports_http1_client_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -445,6 +550,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                tls: config::RouteTlsConfig::default(),
                 path: "/".to_string(),
             },
             config::Route {
@@ -454,6 +560,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: h2c_upstream.addr.ip().to_string(),
                     port: h2c_upstream.addr.port().to_string(),
                 },
+                tls: config::RouteTlsConfig::default(),
                 path: "/h2".to_string(),
             },
         ]),
@@ -525,6 +632,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            tls: config::RouteTlsConfig::default(),
             path: "/".to_string(),
         },
         db_path.clone(),
