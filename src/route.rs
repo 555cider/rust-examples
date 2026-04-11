@@ -77,10 +77,9 @@ pub fn build_route_uri(uri: &hyper::Uri, route_config: &config::Route) -> String
         .unwrap_or("/");
 
     format!(
-        "{}://{}:{}{}",
+        "{}://{}{}",
         route_config.scheme,
-        route_config.authority.host,
-        route_config.authority.port,
+        upstream_authority(route_config),
         path_and_query
     )
 }
@@ -139,19 +138,27 @@ pub fn extract_traceparent(headers: &hyper::HeaderMap) -> trace::Traceparent {
 pub fn upstream_host_header(
     route_config: &config::Route,
 ) -> Result<HeaderValue, entity::GatewayError> {
-    HeaderValue::from_str(
-        format!(
-            "{}:{}",
-            route_config.authority.host, route_config.authority.port
-        )
-        .as_str(),
-    )
-    .map_err(|err| {
+    HeaderValue::from_str(upstream_authority(route_config).as_str()).map_err(|err| {
         entity::GatewayError::InvalidRouteConfig(format!(
             "invalid upstream authority '{}:{}': {}",
             route_config.authority.host, route_config.authority.port, err
         ))
     })
+}
+
+pub fn upstream_authority(route_config: &config::Route) -> String {
+    match route_config.authority.host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => {
+            format!(
+                "[{}]:{}",
+                route_config.authority.host, route_config.authority.port
+            )
+        }
+        _ => format!(
+            "{}:{}",
+            route_config.authority.host, route_config.authority.port
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +189,22 @@ mod tests {
     }
 
     #[test]
+    fn build_route_uri_brackets_ipv6_literals() {
+        let uri: hyper::Uri = "/".parse().expect("uri");
+        let route = Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "::1".to_string(),
+                port: "9000".to_string(),
+            },
+            path: "/".to_string(),
+        };
+
+        assert_eq!(build_route_uri(&uri, &route), "http://[::1]:9000/");
+    }
+
+    #[test]
     fn resolve_route_preserves_protocol() {
         let routes: Arc<[Route]> = Arc::from([sample_route(Protocol::H2c)]);
 
@@ -204,6 +227,23 @@ mod tests {
         let header = upstream_host_header(&sample_route(Protocol::Http1)).expect("host header");
 
         assert_eq!(header, "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn upstream_host_header_brackets_ipv6_literals() {
+        let route = Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "::1".to_string(),
+                port: "9000".to_string(),
+            },
+            path: "/".to_string(),
+        };
+
+        let header = upstream_host_header(&route).expect("host header");
+
+        assert_eq!(header, "[::1]:9000");
     }
 
     #[test]
