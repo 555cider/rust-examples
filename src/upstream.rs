@@ -9,11 +9,21 @@ pub struct RoutedRequest {
     pub request: Request<Incoming>,
 }
 
-pub fn route_addr(route: &config::Route) -> SocketAddr {
-    SocketAddr::from((
-        route.authority.host.parse::<IpAddr>().unwrap(),
-        route.authority.port.parse::<u16>().unwrap(),
-    ))
+pub fn route_addr(route: &config::Route) -> Result<SocketAddr, entity::GatewayError> {
+    let host = route.authority.host.parse::<IpAddr>().map_err(|err| {
+        entity::GatewayError::InvalidRouteConfig(format!(
+            "invalid route host '{}': {}",
+            route.authority.host, err
+        ))
+    })?;
+    let port = route.authority.port.parse::<u16>().map_err(|err| {
+        entity::GatewayError::InvalidRouteConfig(format!(
+            "invalid route port '{}': {}",
+            route.authority.port, err
+        ))
+    })?;
+
+    Ok(SocketAddr::from((host, port)))
 }
 
 pub async fn send(
@@ -59,5 +69,36 @@ pub async fn send(
                 entity::GatewayBody::Incoming(body),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_route(host: &str, port: &str) -> config::Route {
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: host.to_string(),
+                port: port.to_string(),
+            },
+            path: "/".to_string(),
+        }
+    }
+
+    #[test]
+    fn route_addr_rejects_invalid_host() {
+        let err = route_addr(&sample_route("not-an-ip", "9000")).expect_err("invalid host");
+
+        assert!(matches!(err, entity::GatewayError::InvalidRouteConfig(_)));
+    }
+
+    #[test]
+    fn route_addr_rejects_invalid_port() {
+        let err = route_addr(&sample_route("127.0.0.1", "abc")).expect_err("invalid port");
+
+        assert!(matches!(err, entity::GatewayError::InvalidRouteConfig(_)));
     }
 }

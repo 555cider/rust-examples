@@ -37,6 +37,7 @@ pub enum GatewayError {
     Io(std::io::Error),
     Http(hyper::http::Error),
     RouteNotFound(String),
+    InvalidRouteConfig(String),
 }
 
 impl Display for GatewayError {
@@ -46,6 +47,7 @@ impl Display for GatewayError {
             Self::Io(err) => write!(f, "io error: {}", err),
             Self::Http(err) => write!(f, "http error: {}", err),
             Self::RouteNotFound(path) => write!(f, "route not found: {}", path),
+            Self::InvalidRouteConfig(message) => write!(f, "invalid route config: {}", message),
         }
     }
 }
@@ -57,6 +59,7 @@ impl Error for GatewayError {
             Self::Io(err) => Some(err),
             Self::Http(err) => Some(err),
             Self::RouteNotFound(_) => None,
+            Self::InvalidRouteConfig(_) => None,
         }
     }
 }
