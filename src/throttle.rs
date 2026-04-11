@@ -147,6 +147,7 @@ mod tests {
         let db_path = std::env::temp_dir().join(format!("throttle-{}.db", fastrand::u64(..)));
         let pool = init_throttle_at(&db_path).expect("throttle db should initialize");
         assert!(pool.lock().unwrap().get().is_ok());
-        std::fs::remove_file(db_path).ok();
+        drop(pool);
+        std::fs::remove_file(&db_path).expect("temporary throttle db should be removed");
     }
 }
