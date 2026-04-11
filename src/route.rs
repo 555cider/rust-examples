@@ -1,104 +1,89 @@
-use std::{
-    net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use crate::{config, entity, throttle, trace};
+use crate::{config, entity, throttle, trace, upstream};
 use hyper::{body::Incoming, service::service_fn, Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder as AutoBuilder,
+};
 
 pub async fn run(
     gateway_stream: tokio::net::TcpStream,
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
 ) -> Result<(), entity::GatewayError> {
-    let service_fn = service_fn(move |incoming_request: Request<Incoming>| {
-            log::info!("incoming_request = {:?}", &incoming_request);
+    let service = service_fn(move |incoming_request: Request<Incoming>| {
+        let route_config_arr = route_config_arr_clone.clone();
+        let throttle_pool = throttle_pool_clone.clone();
 
-            let throttle_status: hyper::http::StatusCode = throttle::run(
-                &throttle_pool_clone.lock().unwrap().get().unwrap(),
+        async move {
+            let throttle_status = throttle::run(
+                &throttle_pool.lock().unwrap().get().unwrap(),
                 incoming_request.headers(),
             )
             .unwrap();
-            log::info!("throttle_status = {:?}", throttle_status);
 
-            let (outgoing_request, addr) = route_request(incoming_request, &route_config_arr_clone);
-
-            async move {
-                if !throttle_status.is_success() {
-                    return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(
-                        entity::get_gateway_response(throttle_status),
-                    );
-                }
-
-                let route_stream = tokio::net::TcpStream::connect(addr).await?;
-                let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
-                    .handshake::<_, Incoming>(TokioIo::new(route_stream))
-                    .await?;
-
-                tokio::task::spawn(async move {
-                    if let Err(err) = conn.await {
-                        log::error!("Failed to spawn a connection: {:?}", err);
-                    }
-                });
-
-                let incoming_response = sender.send_request(outgoing_request).await?;
-                let (parts, body) = incoming_response.into_parts();
-                let outgoing_response = Response::from_parts(parts, entity::GatewayBody::Incoming(body));
-                log::info!("outgoing_response = {:?}", outgoing_response);
-                Ok::<Response<entity::GatewayBody>, entity::GatewayError>(outgoing_response)
+            if !throttle_status.is_success() {
+                return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(
+                    entity::get_gateway_response(throttle_status),
+                );
             }
-        });
 
-    match hyper::server::conn::http1::Builder::new()
-        .serve_connection(TokioIo::new(gateway_stream), service_fn)
-        .await
-    {
-        Ok(res) => Ok(res),
-        Err(err) => {
-            log::error!("Failed to bind a connection with a service: {:?}", err);
-            Err(entity::GatewayError::from(err))
+            let routed = route_request(incoming_request, &route_config_arr)?;
+            upstream::send(routed).await
         }
-    }
+    });
+
+    AutoBuilder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(gateway_stream), service)
+        .await
+        .map_err(|err| entity::GatewayError::Io(std::io::Error::other(err)))
+}
+
+pub fn resolve_route(
+    path: &str,
+    route_config_arr: &[config::Route],
+) -> Result<config::Route, entity::GatewayError> {
+    config::get_route(path, route_config_arr)
+        .cloned()
+        .ok_or_else(|| entity::GatewayError::RouteNotFound(path.to_string()))
+}
+
+pub fn build_route_uri(uri: &hyper::Uri, route_config: &config::Route) -> String {
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+
+    format!(
+        "{}://{}:{}{}",
+        route_config.scheme,
+        route_config.authority.host,
+        route_config.authority.port,
+        path_and_query
+    )
 }
 
 pub fn route_request(
     incoming_request: Request<Incoming>,
     route_config_arr: &[config::Route],
-) -> (Request<Incoming>, SocketAddr) {
-    log::info!("incoming_request = {:?}", &incoming_request);
+) -> Result<upstream::RoutedRequest, entity::GatewayError> {
+    let route_config = resolve_route(incoming_request.uri().path(), route_config_arr)?;
+    let request = build_request(incoming_request, &route_config)?;
 
-    let route_config: config::Route =
-        config::get_route(incoming_request.uri().path(), route_config_arr)
-            .expect("Failed to get the routing configuration for the request!")
-            .clone();
-
-    let route_addr: SocketAddr = SocketAddr::from((
-        route_config.authority.host.parse::<IpAddr>().unwrap(),
-        route_config.authority.port.parse::<u16>().unwrap(),
-    ));
-    log::info!("Routed to {}://{:?}", route_config.scheme, &route_addr);
-
-    (
-        build_request(incoming_request, route_config).expect("Failed to create a routing request!"),
-        route_addr,
-    )
+    Ok(upstream::RoutedRequest {
+        addr: upstream::route_addr(&route_config),
+        protocol: route_config.protocol.clone(),
+        request,
+    })
 }
 
 pub fn build_request(
     request: Request<Incoming>,
-    route_config: config::Route,
+    route_config: &config::Route,
 ) -> Result<Request<Incoming>, hyper::http::Error> {
-    let uri: String = format!(
-        "{}://{}:{}{}",
-        route_config.scheme,
-        route_config.authority.host,
-        route_config.authority.port,
-        request.uri().path()
-    );
-
-    let traceparent: trace::Traceparent =
-        trace::extract(request.headers()).expect("Failed to extract trace context!");
+    let traceparent = trace::extract(request.headers()).expect("Failed to extract trace context!");
+    let uri = build_route_uri(request.uri(), route_config);
 
     let mut request_builder = Request::builder()
         .uri(uri)
@@ -110,4 +95,39 @@ pub fn build_request(
         .unwrap()
         .append("traceparent", traceparent.as_headervalue());
     request_builder.body(request.into_body())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Authority, Protocol, Route};
+
+    fn sample_route(protocol: Protocol) -> Route {
+        Route {
+            scheme: "http".to_string(),
+            protocol,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            path: "/".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_route_uri_keeps_query_string() {
+        let uri: hyper::Uri = "/product?id=7".parse().expect("uri");
+        assert_eq!(
+            build_route_uri(&uri, &sample_route(Protocol::Http1)),
+            "http://127.0.0.1:9000/product?id=7"
+        );
+    }
+
+    #[test]
+    fn resolve_route_preserves_protocol() {
+        let routes: Arc<[Route]> = Arc::from([sample_route(Protocol::H2c)]);
+
+        let route = resolve_route("/", &routes).expect("route should exist");
+        assert_eq!(route.protocol, Protocol::H2c);
+    }
 }

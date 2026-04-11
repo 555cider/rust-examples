@@ -36,6 +36,7 @@ pub enum GatewayError {
     Hyper(hyper::Error),
     Io(std::io::Error),
     Http(hyper::http::Error),
+    RouteNotFound(String),
 }
 
 impl Display for GatewayError {
@@ -44,6 +45,7 @@ impl Display for GatewayError {
             Self::Hyper(err) => write!(f, "hyper error: {}", err),
             Self::Io(err) => write!(f, "io error: {}", err),
             Self::Http(err) => write!(f, "http error: {}", err),
+            Self::RouteNotFound(path) => write!(f, "route not found: {}", path),
         }
     }
 }
@@ -54,6 +56,7 @@ impl Error for GatewayError {
             Self::Hyper(err) => Some(err),
             Self::Io(err) => Some(err),
             Self::Http(err) => Some(err),
+            Self::RouteNotFound(_) => None,
         }
     }
 }

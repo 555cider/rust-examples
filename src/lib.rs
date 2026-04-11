@@ -4,3 +4,4 @@ pub mod logger;
 pub mod route;
 pub mod throttle;
 pub mod trace;
+pub mod upstream;
