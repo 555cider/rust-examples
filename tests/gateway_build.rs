@@ -416,21 +416,21 @@ async fn supports_multi_route_protocol_selection() {
         Arc::from([
             config::Route {
                 scheme: "http".to_string(),
-                protocol: config::Protocol::H2c,
-                authority: config::Authority {
-                    host: h2c_upstream.addr.ip().to_string(),
-                    port: h2c_upstream.addr.port().to_string(),
-                },
-                path: "/h2".to_string(),
-            },
-            config::Route {
-                scheme: "http".to_string(),
                 protocol: config::Protocol::Http1,
                 authority: config::Authority {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
                 path: "/".to_string(),
+            },
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::H2c,
+                authority: config::Authority {
+                    host: h2c_upstream.addr.ip().to_string(),
+                    port: h2c_upstream.addr.port().to_string(),
+                },
+                path: "/h2".to_string(),
             },
         ]),
         temp_db_path(),

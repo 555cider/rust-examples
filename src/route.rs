@@ -264,4 +264,22 @@ mod tests {
 
         assert_eq!(traceparent.as_string().len(), 55);
     }
+
+    #[test]
+    fn extract_traceparent_preserves_valid_traceparent_without_tracestate() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            hyper::header::HeaderValue::from_static(
+                "00-00000000000000000000000000000001-0000000000000002-01",
+            ),
+        );
+
+        let traceparent = extract_traceparent(&headers);
+
+        assert_eq!(
+            traceparent.as_string(),
+            "00-00000000000000000000000000000001-0000000000000002-01"
+        );
+    }
 }

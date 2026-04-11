@@ -36,7 +36,10 @@ pub fn load_config(path: &str) -> GatewayConfig {
 }
 
 pub fn get_route<'a>(path: &str, route: &'a [Route]) -> Option<&'a Route> {
-    route.iter().find(|candidate| path.starts_with(&candidate.path))
+    route
+        .iter()
+        .filter(|candidate| path.starts_with(&candidate.path))
+        .max_by_key(|candidate| candidate.path.len())
 }
 
 #[cfg(test)]
@@ -99,5 +102,34 @@ route:
         );
 
         assert!(config.is_err());
+    }
+
+    #[test]
+    fn prefers_longest_matching_route_prefix() {
+        let routes: Arc<[Route]> = Arc::from([
+            Route {
+                scheme: "http".to_string(),
+                protocol: Protocol::Http1,
+                authority: Authority {
+                    host: "127.0.0.1".to_string(),
+                    port: "8001".to_string(),
+                },
+                path: "/".to_string(),
+            },
+            Route {
+                scheme: "http".to_string(),
+                protocol: Protocol::H2c,
+                authority: Authority {
+                    host: "127.0.0.1".to_string(),
+                    port: "8002".to_string(),
+                },
+                path: "/h2".to_string(),
+            },
+        ]);
+
+        let route = get_route("/h2/resource", &routes).expect("route should exist");
+
+        assert_eq!(route.path, "/h2");
+        assert_eq!(route.protocol, Protocol::H2c);
     }
 }

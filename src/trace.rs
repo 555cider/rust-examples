@@ -62,10 +62,6 @@ pub fn new() -> Traceparent {
 }
 
 pub fn extract(headers: &hyper::HeaderMap) -> Result<Traceparent, std::num::ParseIntError> {
-    if headers.get("tracestate").is_none() {
-        return Ok(new());
-    }
-
     let traceparent: &str = match headers.get("traceparent") {
         Some(header) => header
             .to_str()
