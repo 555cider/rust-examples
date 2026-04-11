@@ -11,8 +11,7 @@ pub fn init_throttle() -> rusqlite::Result<ThrottlePool, rusqlite::Error> {
 
 pub fn init_throttle_at(path: impl AsRef<Path>) -> rusqlite::Result<ThrottlePool, rusqlite::Error> {
     log::info!("Open a throttle DB connection");
-    let conn_manager =
-        r2d2_sqlite::SqliteConnectionManager::file(path.as_ref().to_path_buf());
+    let conn_manager = r2d2_sqlite::SqliteConnectionManager::file(path);
     let conn_pool = r2d2::Pool::new(conn_manager).expect("Failed to create a DB connection pool");
     let conn_pool_am = Arc::new(Mutex::new(conn_pool));
     let conn = conn_pool_am.lock().unwrap().get().unwrap();
