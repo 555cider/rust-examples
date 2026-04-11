@@ -24,7 +24,7 @@ fn assert_temp_db_artifacts_removed(db_path: &PathBuf) {
     }
 }
 
-fn remove_temp_db_artifacts(db_path: &PathBuf) {
+fn cleanup_temp_db_artifacts(db_path: &PathBuf) -> std::io::Result<()> {
     for path in [
         db_path.clone(),
         PathBuf::from(format!("{}-journal", db_path.display())),
@@ -34,37 +34,72 @@ fn remove_temp_db_artifacts(db_path: &PathBuf) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => panic!(
-                "failed to remove temporary throttle database artifact {}: {}",
-                path.display(),
-                err
-            ),
+            Err(err) => return Err(err),
         }
+    }
+
+    Ok(())
+}
+
+struct TempDbGuard {
+    db_path: PathBuf,
+}
+
+impl TempDbGuard {
+    fn new(db_path: PathBuf) -> Self {
+        Self { db_path }
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.db_path
     }
 }
 
 struct SpawnedGateway {
     addr: std::net::SocketAddr,
-    db_path: PathBuf,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
+    db_guard: TempDbGuard,
 }
 
 impl SpawnedGateway {
-    async fn finish(self) {
-        self.task.await.unwrap();
-        remove_temp_db_artifacts(&self.db_path);
-        assert_temp_db_artifacts_removed(&self.db_path);
+    async fn finish(mut self) {
+        self.task.take().unwrap().await.unwrap();
+        let db_path = self.db_guard.path().clone();
+        drop(self);
+        assert_temp_db_artifacts_removed(&db_path);
     }
 }
 
 struct SpawnedUpstream {
     addr: std::net::SocketAddr,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl SpawnedUpstream {
-    async fn finish(self) {
-        self.task.await.unwrap();
+    async fn finish(mut self) {
+        self.task.take().unwrap().await.unwrap();
+    }
+}
+
+impl Drop for TempDbGuard {
+    fn drop(&mut self) {
+        let _ = cleanup_temp_db_artifacts(&self.db_path);
+    }
+}
+
+impl Drop for SpawnedGateway {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for SpawnedUpstream {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -77,11 +112,13 @@ fn gateway_library_exports_public_modules() {
     let _ = throttle::init_throttle;
     let _ = trace::new;
 
-    let db_path = temp_db_path();
+    let db_guard = TempDbGuard::new(temp_db_path());
+    let db_path = db_guard.path().clone();
     let pool =
         throttle::init_throttle_at(&db_path).expect("test-friendly throttle API should work");
     drop(pool);
-    std::fs::remove_file(&db_path).expect("temporary throttle db should be removed");
+    drop(db_guard);
+    assert_temp_db_artifacts_removed(&db_path);
 }
 
 async fn spawn_gateway_once(route_config: config::Route, db_path: PathBuf) -> SpawnedGateway {
@@ -97,7 +134,11 @@ async fn spawn_gateway_once(route_config: config::Route, db_path: PathBuf) -> Sp
         route::run(stream, routes, throttle_pool).await.unwrap();
     });
 
-    SpawnedGateway { addr, db_path, task }
+    SpawnedGateway {
+        addr,
+        task: Some(task),
+        db_guard: TempDbGuard::new(db_path),
+    }
 }
 
 async fn spawn_http1_upstream() -> SpawnedUpstream {
@@ -130,7 +171,10 @@ async fn spawn_http1_upstream() -> SpawnedUpstream {
             .unwrap();
     });
 
-    SpawnedUpstream { addr, task }
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
 }
 
 async fn spawn_h2c_upstream() -> SpawnedUpstream {
@@ -163,7 +207,10 @@ async fn spawn_h2c_upstream() -> SpawnedUpstream {
             .unwrap();
     });
 
-    SpawnedUpstream { addr, task }
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
 }
 
 async fn send_http1_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
@@ -309,4 +356,28 @@ async fn supports_http1_client_to_h2c_upstream() {
     assert_eq!(body, Bytes::from_static(b"h2c"));
     gateway.finish().await;
     upstream.finish().await;
+}
+
+#[test]
+fn temp_db_guard_removes_artifacts_during_panic_unwind() {
+    let db_path = temp_db_path();
+    for path in [
+        db_path.clone(),
+        PathBuf::from(format!("{}-journal", db_path.display())),
+        PathBuf::from(format!("{}-shm", db_path.display())),
+        PathBuf::from(format!("{}-wal", db_path.display())),
+    ] {
+        std::fs::write(&path, b"temp").unwrap();
+    }
+
+    let unwind = std::panic::catch_unwind({
+        let db_path = db_path.clone();
+        move || {
+            let _guard = TempDbGuard::new(db_path);
+            panic!("intentional panic for cleanup regression");
+        }
+    });
+
+    assert!(unwind.is_err());
+    assert_temp_db_artifacts_removed(&db_path);
 }
