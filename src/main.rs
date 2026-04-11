@@ -1,6 +1,5 @@
 use hyper_gateway::{config, logger, route, throttle};
 use std::{
-    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
@@ -10,17 +9,20 @@ async fn main() {
     log::info!("Initialized the logger");
 
     let gateway_config: config::GatewayConfig = config::load_config("config.yaml");
-    let route_config_arr: Arc<[config::Route]> = gateway_config.route;
+    let gateway_addr = gateway_config.server.listen.clone();
+    let route_config_arr: Arc<[config::Route]> = gateway_config.routes;
 
     let throttle_pool: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
         throttle::init_throttle().expect("Failed to initialize the throttle!");
 
-    let gateway_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    let gateway_listener = tokio::net::TcpListener::bind(gateway_addr)
+    let gateway_listener = tokio::net::TcpListener::bind(gateway_addr.as_str())
         .await
         .expect("Failed to create the TCP listener!");
+    let bound_addr = gateway_listener
+        .local_addr()
+        .expect("Failed to resolve the listener address!");
 
-    log::info!("Listening on http://{}", &gateway_addr);
+    log::info!("Listening on http://{}", &bound_addr);
     loop {
         let (gateway_stream, _) = gateway_listener
             .accept()

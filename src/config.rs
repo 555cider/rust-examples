@@ -3,7 +3,24 @@ use std::{fs::File, io::Read, sync::Arc};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
-    pub route: Arc<[Route]>,
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(alias = "route")]
+    pub routes: Arc<[Route]>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerConfig {
+    #[serde(default = "default_listen_addr")]
+    pub listen: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_listen_addr(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -27,6 +44,10 @@ pub struct Authority {
     pub port: String,
 }
 
+fn default_listen_addr() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
 pub fn load_config(path: &str) -> GatewayConfig {
     let mut contents: String = String::new();
     let mut file: File = File::open(path).expect("Failed to open the configuration file!");
@@ -45,6 +66,46 @@ pub fn get_route<'a>(path: &str, route: &'a [Route]) -> Option<&'a Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_server_listen_and_routes_alias() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  listen: 127.0.0.1:9090
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.server.listen, "127.0.0.1:9090");
+        assert_eq!(config.routes[0].authority.host, "localhost");
+    }
+
+    #[test]
+    fn keeps_legacy_route_key_compatible() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+route:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: 127.0.0.1
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("legacy config should parse");
+
+        assert_eq!(config.server.listen, "127.0.0.1:8080");
+        assert_eq!(config.routes.len(), 1);
+    }
 
     #[test]
     fn parses_http1_and_h2c_routes() {
@@ -67,8 +128,8 @@ route:
         )
         .expect("config should parse");
 
-        assert_eq!(config.route[0].protocol, Protocol::Http1);
-        assert_eq!(config.route[1].protocol, Protocol::H2c);
+        assert_eq!(config.routes[0].protocol, Protocol::Http1);
+        assert_eq!(config.routes[1].protocol, Protocol::H2c);
     }
 
     #[test]
