@@ -1,19 +1,19 @@
 ---
 route:
-  - id: something
-    scheme: http
+  - scheme: http
+    protocol: http1
     authority:
       host: 127.0.0.1
       port: 8001
     path: /something
-  - id: product
-    scheme: http
+  - scheme: http
+    protocol: http1
     authority:
       host: 127.0.0.1
       port: 8001
     path: /product
-  - id: default
-    scheme: http
+  - scheme: http
+    protocol: http1
     authority:
       host: 127.0.0.1
       port: 8001
