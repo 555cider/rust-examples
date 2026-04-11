@@ -2,16 +2,19 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::{body::Bytes, Request, Response, StatusCode};
 use hyper_gateway::{config, config::Protocol, entity, logger, route, throttle, trace};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::task::JoinHandle;
 
 fn temp_db_path() -> PathBuf {
     std::env::temp_dir().join(format!("gateway-throttle-{}.db", fastrand::u64(..)))
 }
 
-fn assert_temp_db_artifacts_removed(db_path: &PathBuf) {
+fn assert_temp_db_artifacts_removed(db_path: &Path) {
     for path in [
-        db_path.clone(),
+        db_path.to_path_buf(),
         PathBuf::from(format!("{}-journal", db_path.display())),
         PathBuf::from(format!("{}-shm", db_path.display())),
         PathBuf::from(format!("{}-wal", db_path.display())),
@@ -24,11 +27,11 @@ fn assert_temp_db_artifacts_removed(db_path: &PathBuf) {
     }
 }
 
-fn wait_for_temp_db_artifacts_removed(db_path: &PathBuf) {
+fn wait_for_temp_db_artifacts_removed(db_path: &Path) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
         if [
-            db_path.clone(),
+            db_path.to_path_buf(),
             PathBuf::from(format!("{}-journal", db_path.display())),
             PathBuf::from(format!("{}-shm", db_path.display())),
             PathBuf::from(format!("{}-wal", db_path.display())),
@@ -47,9 +50,9 @@ fn wait_for_temp_db_artifacts_removed(db_path: &PathBuf) {
     }
 }
 
-fn cleanup_temp_db_artifacts(db_path: &PathBuf) -> std::io::Result<()> {
+fn cleanup_temp_db_artifacts(db_path: &Path) -> std::io::Result<()> {
     for path in [
-        db_path.clone(),
+        db_path.to_path_buf(),
         PathBuf::from(format!("{}-journal", db_path.display())),
         PathBuf::from(format!("{}-shm", db_path.display())),
         PathBuf::from(format!("{}-wal", db_path.display())),
@@ -64,7 +67,7 @@ fn cleanup_temp_db_artifacts(db_path: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
-fn cleanup_temp_db_artifacts_with_retry(db_path: &PathBuf) -> std::io::Result<()> {
+fn cleanup_temp_db_artifacts_with_retry(db_path: &Path) -> std::io::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
 
     loop {
@@ -163,12 +166,18 @@ fn gateway_library_exports_public_modules() {
 }
 
 async fn spawn_gateway_once(route_config: config::Route, db_path: PathBuf) -> SpawnedGateway {
+    spawn_gateway_with_routes(Arc::from([route_config]), db_path).await
+}
+
+async fn spawn_gateway_with_routes(
+    routes: Arc<[config::Route]>,
+    db_path: PathBuf,
+) -> SpawnedGateway {
     let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let routes: Arc<[config::Route]> = Arc::from([route_config]);
 
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -397,6 +406,63 @@ async fn supports_http1_client_to_h2c_upstream() {
     assert_eq!(body, Bytes::from_static(b"h2c"));
     gateway.finish().await;
     upstream.finish().await;
+}
+
+#[tokio::test]
+async fn supports_multi_route_protocol_selection() {
+    let default_upstream = spawn_http1_upstream().await;
+    let h2c_upstream = spawn_h2c_upstream().await;
+    let gateway = spawn_gateway_with_routes(
+        Arc::from([
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::H2c,
+                authority: config::Authority {
+                    host: h2c_upstream.addr.ip().to_string(),
+                    port: h2c_upstream.addr.port().to_string(),
+                },
+                path: "/h2".to_string(),
+            },
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: default_upstream.addr.ip().to_string(),
+                    port: default_upstream.addr.port().to_string(),
+                },
+                path: "/".to_string(),
+            },
+        ]),
+        temp_db_path(),
+    )
+    .await;
+
+    let stream = tokio::net::TcpStream::connect(gateway.addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let request = Request::builder()
+        .uri("http://gateway.local/h2")
+        .header("api-key", "1")
+        .body(Empty::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    drop(sender);
+    conn_task.await.unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"h2c"));
+    gateway.finish().await;
+    h2c_upstream.finish().await;
+    drop(default_upstream);
 }
 
 #[test]

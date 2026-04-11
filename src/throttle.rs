@@ -141,12 +141,43 @@ pub fn run(
 mod tests {
     use super::*;
 
+    fn assert_temp_db_artifacts_removed(db_path: &std::path::Path) {
+        for path in [
+            db_path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-journal", db_path.display())),
+            std::path::PathBuf::from(format!("{}-shm", db_path.display())),
+            std::path::PathBuf::from(format!("{}-wal", db_path.display())),
+        ] {
+            assert!(
+                !path.exists(),
+                "temporary throttle database artifact should be removed: {}",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn initializes_named_sqlite_database() {
         let db_path = std::env::temp_dir().join(format!("throttle-{}.db", fastrand::u64(..)));
         let pool = init_throttle_at(&db_path).expect("throttle db should initialize");
         assert!(pool.lock().unwrap().get().is_ok());
         drop(pool);
-        std::fs::remove_file(&db_path).expect("temporary throttle db should be removed");
+        for path in [
+            db_path.clone(),
+            std::path::PathBuf::from(format!("{}-journal", db_path.display())),
+            std::path::PathBuf::from(format!("{}-shm", db_path.display())),
+            std::path::PathBuf::from(format!("{}-wal", db_path.display())),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => panic!(
+                    "temporary throttle db artifact should be removed ({}): {}",
+                    path.display(),
+                    err
+                ),
+            }
+        }
+        assert_temp_db_artifacts_removed(&db_path);
     }
 }
