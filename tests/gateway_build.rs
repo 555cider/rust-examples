@@ -669,6 +669,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -700,6 +701,7 @@ async fn round_robins_across_configured_http1_upstreams() {
             }]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -720,6 +722,78 @@ async fn round_robins_across_configured_http1_upstreams() {
 }
 
 #[tokio::test]
+async fn retries_failed_primary_connection_on_next_upstream() {
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("probe listener");
+    let dead_port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+
+    let backup = spawn_http1_upstream_with_body_for_connections(b"retry-backup", 1).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "127.0.0.1".to_string(),
+                port: dead_port.to_string(),
+            },
+            upstreams: Arc::from([config::Authority {
+                host: backup.addr.ip().to_string(),
+                port: backup.addr.port().to_string(),
+            }]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"retry-backup"));
+    gateway.finish().await;
+    backup.finish().await;
+}
+
+#[tokio::test]
+async fn retries_upstream_timeout_on_next_backend() {
+    let slow = spawn_slow_http1_upstream(100).await;
+    let backup = spawn_http1_upstream_with_body_for_connections(b"timeout-backup", 1).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: slow.addr.ip().to_string(),
+                port: slow.addr.port().to_string(),
+            },
+            upstreams: Arc::from([config::Authority {
+                host: backup.addr.ip().to_string(),
+                port: backup.addr.port().to_string(),
+            }]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 10,
+            retry_attempts: 1,
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"timeout-backup"));
+    gateway.finish().await;
+    slow.finish().await;
+    backup.finish().await;
+}
+
+#[tokio::test]
 async fn supports_https_client_to_http1_upstream() {
     let tls_fixture = create_localhost_tls_fixture();
     let upstream = spawn_http1_upstream().await;
@@ -734,6 +808,7 @@ async fn supports_https_client_to_http1_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -765,6 +840,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -793,6 +869,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -821,6 +898,7 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 10,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -848,6 +926,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -878,6 +957,7 @@ async fn supports_http1_gateway_to_https_upstream() {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -910,6 +990,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -936,6 +1017,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -963,6 +1045,7 @@ async fn supports_h2c_client_to_http1_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -990,6 +1073,7 @@ async fn supports_http1_client_to_h2c_upstream() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1019,6 +1103,7 @@ async fn supports_multi_route_protocol_selection() {
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
+                retry_attempts: 0,
                 path: "/".to_string(),
             },
             config::Route {
@@ -1031,6 +1116,7 @@ async fn supports_multi_route_protocol_selection() {
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
+                retry_attempts: 0,
                 path: "/h2".to_string(),
             },
         ]),
@@ -1105,6 +1191,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         },
         db_path.clone(),

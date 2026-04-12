@@ -1,28 +1,86 @@
-use crate::{config, connector, entity};
-use hyper::{body::Incoming, Request, Response};
+use crate::{config, connector, entity, route};
+use http_body_util::Full;
+use hyper::{body::Bytes, header::HOST, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct RoutedRequest {
     pub route: config::Route,
-    pub authority: config::Authority,
-    pub request: Request<Incoming>,
+    pub start_index: usize,
+    pub method: hyper::Method,
+    pub version: hyper::Version,
+    pub headers: hyper::HeaderMap,
+    pub path_and_query: String,
+    pub body: Bytes,
 }
 
 pub async fn send(
     routed: RoutedRequest,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
-    let protocol = routed.route.protocol.clone();
-    let timeout_ms = routed.route.timeout_ms;
-    let stream = connector::connect(&routed.route, &routed.authority).await?;
+    let max_attempts = routed.route.retry_attempts + 1;
+    let mut last_error = None;
+
+    for attempt in 0..max_attempts {
+        let authority = route::authority_for_attempt(&routed.route, routed.start_index, attempt);
+        let request = build_attempt_request(&routed, authority)?;
+
+        match send_attempt(&routed.route, authority, request).await {
+            Ok(response) => return Ok(response),
+            Err(err) if should_retry(&err) && attempt + 1 < max_attempts => {
+                log::warn!(
+                    "Upstream attempt {}/{} failed for route '{}': {}",
+                    attempt + 1,
+                    max_attempts,
+                    routed.route.path,
+                    err
+                );
+                last_error = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_error.expect("retry loop should preserve the last retryable error"))
+}
+
+fn build_attempt_request(
+    routed: &RoutedRequest,
+    authority: &config::Authority,
+) -> Result<Request<Full<Bytes>>, entity::GatewayError> {
+    let uri = format!(
+        "{}://{}{}",
+        routed.route.scheme,
+        route::upstream_authority(authority),
+        routed.path_and_query
+    );
+    let mut request_builder = Request::builder()
+        .uri(uri)
+        .method(routed.method.clone())
+        .version(routed.version);
+    let headers = request_builder.headers_mut().unwrap();
+    *headers = routed.headers.clone();
+    headers.insert(HOST, route::upstream_host_header(authority)?);
+    request_builder
+        .body(Full::new(routed.body.clone()))
+        .map_err(entity::GatewayError::from)
+}
+
+async fn send_attempt(
+    route: &config::Route,
+    authority: &config::Authority,
+    request: Request<Full<Bytes>>,
+) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
+    let protocol = route.protocol.clone();
+    let timeout_ms = route.timeout_ms;
+    let stream = connector::connect(route, authority).await?;
 
     let response = async move {
         match stream {
             connector::UpstreamStream::Plain(stream) => {
-                send_on_io(TokioIo::new(stream), protocol, routed.request).await
+                send_on_io(TokioIo::new(stream), protocol, request).await
             }
             connector::UpstreamStream::Tls(stream) => {
-                send_on_io(TokioIo::new(stream), protocol, routed.request).await
+                send_on_io(TokioIo::new(stream), protocol, request).await
             }
         }
     };
@@ -32,10 +90,19 @@ pub async fn send(
         .map_err(entity::GatewayError::from)?
 }
 
+fn should_retry(error: &entity::GatewayError) -> bool {
+    matches!(
+        error,
+        entity::GatewayError::Hyper(_)
+            | entity::GatewayError::Io(_)
+            | entity::GatewayError::Timeout(_)
+    )
+}
+
 async fn send_on_io<T>(
     route_io: TokioIo<T>,
     protocol: config::Protocol,
-    request: Request<Incoming>,
+    request: Request<Full<Bytes>>,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -43,7 +110,7 @@ where
     match protocol {
         config::Protocol::Http1 => {
             let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
-                .handshake::<_, Incoming>(route_io)
+                .handshake::<_, Full<Bytes>>(route_io)
                 .await?;
 
             tokio::spawn(async move {
@@ -61,7 +128,7 @@ where
         }
         config::Protocol::H2c | config::Protocol::H2 => {
             let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-                .handshake::<_, Incoming>(route_io)
+                .handshake::<_, Full<Bytes>>(route_io)
                 .await?;
 
             tokio::spawn(async move {

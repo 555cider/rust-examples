@@ -4,11 +4,12 @@ use std::{
 };
 
 use crate::{config, entity, throttle, trace, upstream};
+use http_body_util::BodyExt;
 use hyper::{
-    body::Incoming,
-    header::{HeaderValue, HOST},
+    body::{Bytes, Incoming},
+    header::HeaderValue,
     service::service_fn,
-    Request, Response,
+    HeaderMap, Method, Request, Response, Version,
 };
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -49,7 +50,7 @@ where
                 );
             }
 
-            let response = match route_request(incoming_request, &route_config_arr) {
+            let response = match route_request(incoming_request, &route_config_arr).await {
                 Ok(routed) => upstream::send(routed).await,
                 Err(err) => Err(err),
             };
@@ -116,40 +117,45 @@ pub fn build_route_uri_for_authority(
     )
 }
 
-pub fn route_request(
+pub async fn route_request(
     incoming_request: Request<Incoming>,
     route_config_arr: &[config::Route],
 ) -> Result<upstream::RoutedRequest, entity::GatewayError> {
     let route_config = resolve_route(incoming_request.uri().path(), route_config_arr)?;
-    let authority = select_upstream_authority(&route_config);
-    let request = build_request(incoming_request, &route_config, &authority)?;
+    let start_index = select_upstream_start_index(&route_config);
+    let request = prepare_request(incoming_request).await?;
 
     Ok(upstream::RoutedRequest {
         route: route_config,
-        authority,
-        request,
+        start_index,
+        method: request.method,
+        version: request.version,
+        headers: request.headers,
+        path_and_query: request.path_and_query,
+        body: request.body,
     })
 }
 
-pub fn build_request(
+pub async fn prepare_request(
     request: Request<Incoming>,
-    route_config: &config::Route,
-    authority: &config::Authority,
-) -> Result<Request<Incoming>, entity::GatewayError> {
+) -> Result<PreparedRequest, entity::GatewayError> {
     let traceparent = extract_traceparent(request.headers());
-    let uri = build_route_uri_for_authority(request.uri(), route_config, authority);
-
-    let mut request_builder = Request::builder()
-        .uri(uri)
-        .method(request.method())
-        .version(request.version());
-    let headers = request_builder.headers_mut().unwrap();
-    *headers = request.headers().clone();
-    headers.insert(HOST, upstream_host_header(authority)?);
+    let (parts, body) = request.into_parts();
+    let body = body.collect().await?.to_bytes();
+    let mut headers = parts.headers;
     headers.insert("traceparent", traceparent.as_headervalue());
-    request_builder
-        .body(request.into_body())
-        .map_err(entity::GatewayError::from)
+
+    Ok(PreparedRequest {
+        method: parts.method,
+        version: parts.version,
+        headers,
+        path_and_query: parts
+            .uri
+            .path_and_query()
+            .map(|value| value.as_str().to_string())
+            .unwrap_or_else(|| "/".to_string()),
+        body,
+    })
 }
 
 pub fn extract_traceparent(headers: &hyper::HeaderMap) -> trace::Traceparent {
@@ -189,15 +195,26 @@ pub fn upstream_authority(authority: &config::Authority) -> String {
     }
 }
 
-fn select_upstream_authority(route_config: &config::Route) -> config::Authority {
-    let pool_size = route_config.upstreams.len() + 1;
-    let cursor = next_upstream_cursor(route_balance_key(route_config)) % pool_size;
+pub fn select_upstream_start_index(route_config: &config::Route) -> usize {
+    next_upstream_cursor(route_balance_key(route_config)) % upstream_pool_size(route_config)
+}
 
-    if cursor == 0 {
-        route_config.authority.clone()
+pub fn authority_for_attempt<'a>(
+    route_config: &'a config::Route,
+    start_index: usize,
+    attempt: usize,
+) -> &'a config::Authority {
+    let index = (start_index + attempt) % upstream_pool_size(route_config);
+
+    if index == 0 {
+        &route_config.authority
     } else {
-        route_config.upstreams[cursor - 1].clone()
+        &route_config.upstreams[index - 1]
     }
+}
+
+fn upstream_pool_size(route_config: &config::Route) -> usize {
+    route_config.upstreams.len() + 1
 }
 
 fn route_balance_key(route_config: &config::Route) -> String {
@@ -231,6 +248,14 @@ fn next_upstream_cursor(route_key: String) -> usize {
     selected
 }
 
+pub struct PreparedRequest {
+    pub method: Method,
+    pub version: Version,
+    pub headers: HeaderMap,
+    pub path_and_query: String,
+    pub body: Bytes,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +273,7 @@ mod tests {
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         }
     }
@@ -274,6 +300,7 @@ mod tests {
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         };
 
@@ -318,6 +345,7 @@ mod tests {
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         };
 

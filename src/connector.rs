@@ -82,6 +82,7 @@ mod tests {
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
+            retry_attempts: 0,
             path: "/".to_string(),
         }
     }

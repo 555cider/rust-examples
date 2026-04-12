@@ -45,6 +45,8 @@ pub struct Route {
     pub tls: RouteTlsConfig,
     #[serde(default = "default_route_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_route_retry_attempts")]
+    pub retry_attempts: usize,
     pub path: String,
 }
 
@@ -74,6 +76,10 @@ fn default_listen_addr() -> String {
 
 fn default_route_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_route_retry_attempts() -> usize {
+    0
 }
 
 pub fn load_config(path: &str) -> GatewayConfig {
@@ -230,6 +236,32 @@ routes:
     }
 
     #[test]
+    fn parses_retry_attempts_and_defaults() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    retry_attempts: 2
+    path: /retry
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8002
+    path: /
+"#,
+        )
+        .expect("retry config should parse");
+
+        assert_eq!(config.routes[0].retry_attempts, 2);
+        assert_eq!(config.routes[1].retry_attempts, 0);
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -297,6 +329,7 @@ route:
                 upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
+                retry_attempts: default_route_retry_attempts(),
                 path: "/".to_string(),
             },
             Route {
@@ -309,6 +342,7 @@ route:
                 upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
+                retry_attempts: default_route_retry_attempts(),
                 path: "/h2".to_string(),
             },
         ]);
