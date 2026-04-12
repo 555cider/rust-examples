@@ -72,15 +72,28 @@ async fn send_attempt(
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let protocol = route.protocol.clone();
     let timeout_ms = route.timeout_ms;
+    let response_header_filter = route.response_header_filter.clone();
     let stream = connector::connect(route, authority).await?;
 
     let response = async move {
         match stream {
             connector::UpstreamStream::Plain(stream) => {
-                send_on_io(TokioIo::new(stream), protocol, request).await
+                send_on_io(
+                    TokioIo::new(stream),
+                    protocol,
+                    request,
+                    &response_header_filter,
+                )
+                .await
             }
             connector::UpstreamStream::Tls(stream) => {
-                send_on_io(TokioIo::new(stream), protocol, request).await
+                send_on_io(
+                    TokioIo::new(stream),
+                    protocol,
+                    request,
+                    &response_header_filter,
+                )
+                .await
             }
         }
     };
@@ -103,6 +116,7 @@ async fn send_on_io<T>(
     route_io: TokioIo<T>,
     protocol: config::Protocol,
     request: Request<Full<Bytes>>,
+    response_header_filter: &config::HeaderFilterConfig,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -120,7 +134,8 @@ where
             });
 
             let response = sender.send_request(request).await?;
-            let (parts, body) = response.into_parts();
+            let (mut parts, body) = response.into_parts();
+            route::apply_header_filter(&mut parts.headers, response_header_filter)?;
             Ok(Response::from_parts(
                 parts,
                 entity::GatewayBody::Incoming(body),
@@ -138,7 +153,8 @@ where
             });
 
             let response = sender.send_request(request).await?;
-            let (parts, body) = response.into_parts();
+            let (mut parts, body) = response.into_parts();
+            route::apply_header_filter(&mut parts.headers, response_header_filter)?;
             Ok(Response::from_parts(
                 parts,
                 entity::GatewayBody::Incoming(body),

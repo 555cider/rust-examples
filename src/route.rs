@@ -190,6 +190,7 @@ pub async fn prepare_request(
     let (parts, body) = request.into_parts();
     let body = body.collect().await?.to_bytes();
     let mut headers = parts.headers;
+    apply_header_filter(&mut headers, &route_config.request_header_filter)?;
     headers.insert("traceparent", traceparent.as_headervalue());
     let path_and_query = rewrite_path_and_query(&parts.uri, route_config)?;
 
@@ -200,6 +201,41 @@ pub async fn prepare_request(
         path_and_query,
         body,
     })
+}
+
+pub fn apply_header_filter(
+    headers: &mut HeaderMap,
+    filter: &config::HeaderFilterConfig,
+) -> Result<(), entity::GatewayError> {
+    for name in filter.remove.iter() {
+        let header_name =
+            hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+                entity::GatewayError::InvalidRouteConfig(format!(
+                    "invalid filter header name '{}': {}",
+                    name, err
+                ))
+            })?;
+        headers.remove(header_name);
+    }
+
+    for (name, value) in filter.set.iter() {
+        let header_name =
+            hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+                entity::GatewayError::InvalidRouteConfig(format!(
+                    "invalid filter header name '{}': {}",
+                    name, err
+                ))
+            })?;
+        let header_value = HeaderValue::from_str(value).map_err(|err| {
+            entity::GatewayError::InvalidRouteConfig(format!(
+                "invalid filter header value for '{}': {}",
+                name, err
+            ))
+        })?;
+        headers.insert(header_name, header_value);
+    }
+
+    Ok(())
 }
 
 pub fn extract_traceparent(headers: &hyper::HeaderMap) -> trace::Traceparent {
@@ -461,7 +497,7 @@ pub struct PreparedRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Authority, Protocol, Route, RouteTlsConfig};
+    use crate::config::{Authority, HeaderFilterConfig, Protocol, Route, RouteTlsConfig};
     use hyper::http::StatusCode;
 
     fn sample_route(protocol: Protocol) -> Route {
@@ -481,6 +517,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/".to_string(),
         }
     }
@@ -513,6 +551,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/".to_string(),
         };
 
@@ -537,6 +577,8 @@ mod tests {
             timeout_ms: 30_000,
             retry_attempts: 0,
             rewrite_prefix: Some("/".to_string()),
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/api".to_string(),
         };
 
@@ -566,6 +608,8 @@ mod tests {
             timeout_ms: 30_000,
             retry_attempts: 0,
             rewrite_prefix: Some("/".to_string()),
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/api".to_string(),
         };
 
@@ -604,6 +648,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/api".to_string(),
         }]);
 
@@ -638,6 +684,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/".to_string(),
         }]);
 
@@ -675,6 +723,8 @@ mod tests {
             )]),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/".to_string(),
         }]);
 
@@ -705,6 +755,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::from([("region".to_string(), "kr".to_string())]),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/search".to_string(),
         }]);
 
@@ -719,6 +771,28 @@ mod tests {
         .expect("route should match query predicate");
 
         assert_eq!(route.path, "/search");
+    }
+
+    #[test]
+    fn apply_header_filter_removes_then_sets_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-remove-me", HeaderValue::from_static("client"));
+        headers.insert("x-added-by-gateway", HeaderValue::from_static("old"));
+        let filter = HeaderFilterConfig {
+            set: std::collections::BTreeMap::from([(
+                "x-added-by-gateway".to_string(),
+                "enabled".to_string(),
+            )]),
+            remove: Arc::from(["x-remove-me".to_string()]),
+        };
+
+        apply_header_filter(&mut headers, &filter).expect("filter should apply");
+
+        assert!(!headers.contains_key("x-remove-me"));
+        assert_eq!(
+            headers.get("x-added-by-gateway").expect("set header"),
+            "enabled"
+        );
     }
 
     #[test]
@@ -757,6 +831,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: HeaderFilterConfig::default(),
+            response_header_filter: HeaderFilterConfig::default(),
             path: "/".to_string(),
         };
 

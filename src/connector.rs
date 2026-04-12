@@ -88,6 +88,8 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         }
     }

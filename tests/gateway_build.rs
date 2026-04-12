@@ -316,6 +316,76 @@ async fn spawn_http1_upstream_echo_path() -> SpawnedUpstream {
     }
 }
 
+async fn spawn_http1_upstream_echo_filter_headers() -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service =
+            hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                let added = request
+                    .headers()
+                    .get("x-added-by-gateway")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                let removed = request.headers().contains_key("x-remove-me");
+                let body = format!("x-added-by-gateway={added};x-remove-me={removed}");
+
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(body.into_bytes())))
+                        .unwrap(),
+                )
+            });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .ok();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
+async fn spawn_http1_upstream_with_response_headers() -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service =
+            hyper::service::service_fn(|_request: Request<hyper::body::Incoming>| async move {
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("x-upstream-remove", "yes")
+                        .header("x-upstream-keep", "ok")
+                        .body(Full::new(Bytes::from_static(b"response-filter")))
+                        .unwrap(),
+                )
+            });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .ok();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -512,6 +582,17 @@ async fn send_http1_request_with_headers(
     path: &str,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Bytes) {
+    let (status, _, body) = send_http1_request_full(addr, method, host, path, extra_headers).await;
+    (status, body)
+}
+
+async fn send_http1_request_full(
+    addr: std::net::SocketAddr,
+    method: hyper::Method,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, hyper::HeaderMap, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
@@ -533,10 +614,11 @@ async fn send_http1_request_with_headers(
     let request = request_builder.body(Empty::new()).unwrap();
     let response = sender.send_request(request).await.unwrap();
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     drop(sender);
     conn_task.await.unwrap();
-    (status, body)
+    (status, headers, body)
 }
 
 async fn send_http1_requests_on_connection(
@@ -736,6 +818,8 @@ async fn supports_http1_gateway_to_http1_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -773,6 +857,8 @@ async fn round_robins_across_configured_http1_upstreams() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -821,6 +907,8 @@ async fn retries_failed_primary_connection_on_next_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -859,6 +947,8 @@ async fn retries_upstream_timeout_on_next_backend() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -894,6 +984,8 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: Some("/".to_string()),
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/api".to_string(),
         },
         temp_db_path(),
@@ -910,6 +1002,98 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"/users?id=7"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn applies_request_header_filter_before_forwarding_upstream() {
+    let upstream = spawn_http1_upstream_echo_filter_headers().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig {
+                set: BTreeMap::from([("x-added-by-gateway".to_string(), "enabled".to_string())]),
+                remove: Arc::from(["x-remove-me".to_string()]),
+            },
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request_with_headers(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/",
+        &[("x-remove-me", "client")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        Bytes::from_static(b"x-added-by-gateway=enabled;x-remove-me=false")
+    );
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn applies_response_header_filter_before_returning_to_client() {
+    let upstream = spawn_http1_upstream_with_response_headers().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig {
+                set: BTreeMap::from([("x-gateway".to_string(), "enabled".to_string())]),
+                remove: Arc::from(["x-upstream-remove".to_string()]),
+            },
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, headers, body) =
+        send_http1_request_full(gateway.addr, hyper::Method::GET, "gateway.local", "/", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"response-filter"));
+    assert_eq!(headers.get("x-gateway").expect("gateway header"), "enabled");
+    assert!(!headers.contains_key("x-upstream-remove"));
+    assert_eq!(headers.get("x-upstream-keep").expect("keep header"), "ok");
     gateway.finish().await;
     upstream.finish().await;
 }
@@ -936,6 +1120,8 @@ async fn selects_host_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/".to_string(),
             },
             config::Route {
@@ -954,6 +1140,8 @@ async fn selects_host_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/".to_string(),
             },
         ]),
@@ -994,6 +1182,8 @@ async fn selects_method_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/submit".to_string(),
             },
             config::Route {
@@ -1012,6 +1202,8 @@ async fn selects_method_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/submit".to_string(),
             },
         ]),
@@ -1057,6 +1249,8 @@ async fn selects_header_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/tenant".to_string(),
             },
             config::Route {
@@ -1075,6 +1269,8 @@ async fn selects_header_specific_route() {
                 headers: BTreeMap::from([("x-tenant".to_string(), "acme".to_string())]),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/tenant".to_string(),
             },
         ]),
@@ -1121,6 +1317,8 @@ async fn selects_query_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/search".to_string(),
             },
             config::Route {
@@ -1139,6 +1337,8 @@ async fn selects_query_specific_route() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::from([("region".to_string(), "kr".to_string())]),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/search".to_string(),
             },
         ]),
@@ -1182,6 +1382,8 @@ async fn supports_https_client_to_http1_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1219,6 +1421,8 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1253,6 +1457,8 @@ async fn supports_https_h2_client_to_http1_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1287,6 +1493,8 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1320,6 +1528,8 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1356,6 +1566,8 @@ async fn supports_http1_gateway_to_https_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1394,6 +1606,8 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1426,6 +1640,8 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1459,6 +1675,8 @@ async fn supports_h2c_client_to_http1_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1492,6 +1710,8 @@ async fn supports_http1_client_to_h2c_upstream() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1527,6 +1747,8 @@ async fn supports_multi_route_protocol_selection() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/".to_string(),
             },
             config::Route {
@@ -1545,6 +1767,8 @@ async fn supports_multi_route_protocol_selection() {
                 headers: BTreeMap::new(),
                 queries: BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
                 path: "/h2".to_string(),
             },
         ]),
@@ -1625,6 +1849,8 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             headers: BTreeMap::new(),
             queries: BTreeMap::new(),
             rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
             path: "/".to_string(),
         },
         db_path.clone(),

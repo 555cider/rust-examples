@@ -57,6 +57,10 @@ pub struct Route {
     pub retry_attempts: usize,
     #[serde(default)]
     pub rewrite_prefix: Option<String>,
+    #[serde(default)]
+    pub request_header_filter: HeaderFilterConfig,
+    #[serde(default)]
+    pub response_header_filter: HeaderFilterConfig,
     pub path: String,
 }
 
@@ -64,6 +68,14 @@ pub struct Route {
 pub struct Authority {
     pub host: String,
     pub port: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct HeaderFilterConfig {
+    #[serde(default)]
+    pub set: BTreeMap<String, String>,
+    #[serde(default)]
+    pub remove: Arc<[String]>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -346,6 +358,39 @@ routes:
     }
 
     #[test]
+    fn parses_request_and_response_header_filters() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    request_header_filter:
+      remove: [x-remove-me]
+      set:
+        x-added-by-gateway: enabled
+    response_header_filter:
+      remove: [server]
+      set:
+        x-gateway: hyper-gateway
+    path: /
+"#,
+        )
+        .expect("header filter config should parse");
+
+        assert_eq!(
+            config.routes[0].request_header_filter.remove.as_ref(),
+            &["x-remove-me".to_string()]
+        );
+        assert_eq!(
+            config.routes[0].response_header_filter.set.get("x-gateway"),
+            Some(&"hyper-gateway".to_string())
+        );
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -419,6 +464,8 @@ route:
                 headers: std::collections::BTreeMap::new(),
                 queries: std::collections::BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: HeaderFilterConfig::default(),
+                response_header_filter: HeaderFilterConfig::default(),
                 path: "/".to_string(),
             },
             Route {
@@ -437,6 +484,8 @@ route:
                 headers: std::collections::BTreeMap::new(),
                 queries: std::collections::BTreeMap::new(),
                 rewrite_prefix: None,
+                request_header_filter: HeaderFilterConfig::default(),
+                response_header_filter: HeaderFilterConfig::default(),
                 path: "/h2".to_string(),
             },
         ]);
