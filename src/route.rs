@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use crate::{config, entity, throttle, trace, upstream};
 use hyper::{
@@ -92,6 +95,14 @@ pub fn resolve_route(
 }
 
 pub fn build_route_uri(uri: &hyper::Uri, route_config: &config::Route) -> String {
+    build_route_uri_for_authority(uri, route_config, &route_config.authority)
+}
+
+pub fn build_route_uri_for_authority(
+    uri: &hyper::Uri,
+    route_config: &config::Route,
+    authority: &config::Authority,
+) -> String {
     let path_and_query = uri
         .path_and_query()
         .map(|value| value.as_str())
@@ -100,7 +111,7 @@ pub fn build_route_uri(uri: &hyper::Uri, route_config: &config::Route) -> String
     format!(
         "{}://{}{}",
         route_config.scheme,
-        upstream_authority(route_config),
+        upstream_authority(authority),
         path_and_query
     )
 }
@@ -110,10 +121,12 @@ pub fn route_request(
     route_config_arr: &[config::Route],
 ) -> Result<upstream::RoutedRequest, entity::GatewayError> {
     let route_config = resolve_route(incoming_request.uri().path(), route_config_arr)?;
-    let request = build_request(incoming_request, &route_config)?;
+    let authority = select_upstream_authority(&route_config);
+    let request = build_request(incoming_request, &route_config, &authority)?;
 
     Ok(upstream::RoutedRequest {
         route: route_config,
+        authority,
         request,
     })
 }
@@ -121,9 +134,10 @@ pub fn route_request(
 pub fn build_request(
     request: Request<Incoming>,
     route_config: &config::Route,
+    authority: &config::Authority,
 ) -> Result<Request<Incoming>, entity::GatewayError> {
     let traceparent = extract_traceparent(request.headers());
-    let uri = build_route_uri(request.uri(), route_config);
+    let uri = build_route_uri_for_authority(request.uri(), route_config, authority);
 
     let mut request_builder = Request::builder()
         .uri(uri)
@@ -131,7 +145,7 @@ pub fn build_request(
         .version(request.version());
     let headers = request_builder.headers_mut().unwrap();
     *headers = request.headers().clone();
-    headers.insert(HOST, upstream_host_header(route_config)?);
+    headers.insert(HOST, upstream_host_header(authority)?);
     headers.insert("traceparent", traceparent.as_headervalue());
     request_builder
         .body(request.into_body())
@@ -156,29 +170,65 @@ pub fn extract_traceparent(headers: &hyper::HeaderMap) -> trace::Traceparent {
 }
 
 pub fn upstream_host_header(
-    route_config: &config::Route,
+    authority: &config::Authority,
 ) -> Result<HeaderValue, entity::GatewayError> {
-    HeaderValue::from_str(upstream_authority(route_config).as_str()).map_err(|err| {
+    HeaderValue::from_str(upstream_authority(authority).as_str()).map_err(|err| {
         entity::GatewayError::InvalidRouteConfig(format!(
             "invalid upstream authority '{}:{}': {}",
-            route_config.authority.host, route_config.authority.port, err
+            authority.host, authority.port, err
         ))
     })
 }
 
-pub fn upstream_authority(route_config: &config::Route) -> String {
-    match route_config.authority.host.parse::<std::net::IpAddr>() {
+pub fn upstream_authority(authority: &config::Authority) -> String {
+    match authority.host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V6(_)) => {
-            format!(
-                "[{}]:{}",
-                route_config.authority.host, route_config.authority.port
-            )
+            format!("[{}]:{}", authority.host, authority.port)
         }
-        _ => format!(
-            "{}:{}",
-            route_config.authority.host, route_config.authority.port
-        ),
+        _ => format!("{}:{}", authority.host, authority.port),
     }
+}
+
+fn select_upstream_authority(route_config: &config::Route) -> config::Authority {
+    let pool_size = route_config.upstreams.len() + 1;
+    let cursor = next_upstream_cursor(route_balance_key(route_config)) % pool_size;
+
+    if cursor == 0 {
+        route_config.authority.clone()
+    } else {
+        route_config.upstreams[cursor - 1].clone()
+    }
+}
+
+fn route_balance_key(route_config: &config::Route) -> String {
+    let mut key = format!(
+        "{}|{:?}|{}|{}|{}",
+        route_config.path,
+        route_config.protocol,
+        route_config.scheme,
+        route_config.authority.host,
+        route_config.authority.port
+    );
+
+    for authority in route_config.upstreams.iter() {
+        key.push('|');
+        key.push_str(&authority.host);
+        key.push(':');
+        key.push_str(&authority.port);
+    }
+
+    key
+}
+
+fn next_upstream_cursor(route_key: String) -> usize {
+    static ROUTE_BALANCERS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+    let balancers = ROUTE_BALANCERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut balancers = balancers.lock().unwrap();
+    let cursor = balancers.entry(route_key).or_insert(0);
+    let selected = *cursor;
+    *cursor = cursor.wrapping_add(1);
+    selected
 }
 
 #[cfg(test)]
@@ -195,6 +245,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -220,6 +271,7 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -248,7 +300,8 @@ mod tests {
 
     #[test]
     fn upstream_host_header_uses_selected_authority() {
-        let header = upstream_host_header(&sample_route(Protocol::Http1)).expect("host header");
+        let header =
+            upstream_host_header(&sample_route(Protocol::Http1).authority).expect("host header");
 
         assert_eq!(header, "127.0.0.1:9000");
     }
@@ -262,12 +315,13 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
         };
 
-        let header = upstream_host_header(&route).expect("host header");
+        let header = upstream_host_header(&route.authority).expect("host header");
 
         assert_eq!(header, "[::1]:9000");
     }

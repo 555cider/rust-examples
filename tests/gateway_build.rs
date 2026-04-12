@@ -243,6 +243,42 @@ async fn spawn_http1_upstream() -> SpawnedUpstream {
     }
 }
 
+async fn spawn_http1_upstream_with_body_for_connections(
+    body: &'static [u8],
+    connection_count: usize,
+) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        for _ in 0..connection_count {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = hyper::service::service_fn(
+                move |_request: Request<hyper::body::Incoming>| async move {
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Full::new(Bytes::from_static(body)))
+                            .unwrap(),
+                    )
+                },
+            );
+
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .ok();
+        }
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -251,8 +287,8 @@ async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
 
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let service =
-            hyper::service::service_fn(move |_request: Request<hyper::body::Incoming>| async move {
+        let service = hyper::service::service_fn(
+            move |_request: Request<hyper::body::Incoming>| async move {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 Ok::<_, hyper::Error>(
                     Response::builder()
@@ -260,7 +296,8 @@ async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
                         .body(Full::new(Bytes::from_static(b"slow-http1")))
                         .unwrap(),
                 )
-            });
+            },
+        );
 
         hyper::server::conn::http1::Builder::new()
             .serve_connection(TokioIo::new(stream), service)
@@ -317,8 +354,7 @@ fn create_localhost_tls_fixture() -> TlsFixture {
     let key_der = certified.key_pair.serialize_der();
     let cert_path =
         std::env::temp_dir().join(format!("gateway-test-cert-{}.der", fastrand::u64(..)));
-    let key_path =
-        std::env::temp_dir().join(format!("gateway-test-key-{}.der", fastrand::u64(..)));
+    let key_path = std::env::temp_dir().join(format!("gateway-test-key-{}.der", fastrand::u64(..)));
     std::fs::write(&cert_path, &cert_der).expect("write test cert");
     std::fs::write(&key_path, &key_der).expect("write test key");
 
@@ -441,6 +477,38 @@ async fn send_http1_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
     drop(sender);
     conn_task.await.unwrap();
     (status, body)
+}
+
+async fn send_http1_requests_on_connection(
+    addr: std::net::SocketAddr,
+    request_count: usize,
+) -> Vec<(StatusCode, Bytes)> {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let mut responses = Vec::with_capacity(request_count);
+    for _ in 0..request_count {
+        let request = Request::builder()
+            .uri("http://gateway.local/")
+            .header("api-key", "1")
+            .body(Empty::new())
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        responses.push((status, body));
+    }
+
+    drop(sender);
+    conn_task.await.unwrap();
+    responses
 }
 
 async fn send_h2c_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
@@ -598,6 +666,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -614,6 +683,43 @@ async fn supports_http1_gateway_to_http1_upstream() {
 }
 
 #[tokio::test]
+async fn round_robins_across_configured_http1_upstreams() {
+    let upstream_a = spawn_http1_upstream_with_body_for_connections(b"backend-a", 2).await;
+    let upstream_b = spawn_http1_upstream_with_body_for_connections(b"backend-b", 1).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream_a.addr.ip().to_string(),
+                port: upstream_a.addr.port().to_string(),
+            },
+            upstreams: Arc::from([config::Authority {
+                host: upstream_b.addr.ip().to_string(),
+                port: upstream_b.addr.port().to_string(),
+            }]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let responses = send_http1_requests_on_connection(gateway.addr, 3).await;
+    let (_, body_a) = &responses[0];
+    let (_, body_b) = &responses[1];
+    let (_, body_c) = &responses[2];
+
+    assert_eq!(body_a, &Bytes::from_static(b"backend-a"));
+    assert_eq!(body_b, &Bytes::from_static(b"backend-b"));
+    assert_eq!(body_c, &Bytes::from_static(b"backend-a"));
+    gateway.finish().await;
+    upstream_a.finish().await;
+    upstream_b.finish().await;
+}
+
+#[tokio::test]
 async fn supports_https_client_to_http1_upstream() {
     let tls_fixture = create_localhost_tls_fixture();
     let upstream = spawn_http1_upstream().await;
@@ -625,6 +731,7 @@ async fn supports_https_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -653,6 +760,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
@@ -682,6 +790,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -709,6 +818,7 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 10,
             path: "/".to_string(),
@@ -735,6 +845,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -762,6 +873,7 @@ async fn supports_http1_gateway_to_https_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
@@ -795,6 +907,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
                 host: "127.0.0.1".to_string(),
                 port: unused_port.to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -820,6 +933,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -846,6 +960,7 @@ async fn supports_h2c_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -872,6 +987,7 @@ async fn supports_http1_client_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -900,6 +1016,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 path: "/".to_string(),
@@ -911,6 +1028,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: h2c_upstream.addr.ip().to_string(),
                     port: h2c_upstream.addr.port().to_string(),
                 },
+                upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 path: "/h2".to_string(),
@@ -984,6 +1102,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),

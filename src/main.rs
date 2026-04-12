@@ -27,7 +27,11 @@ async fn main() {
         ))
     });
 
-    let scheme = if tls_acceptor.is_some() { "https" } else { "http" };
+    let scheme = if tls_acceptor.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     log::info!("Listening on {}://{}", scheme, &bound_addr);
     loop {
         let (gateway_stream, _) = gateway_listener

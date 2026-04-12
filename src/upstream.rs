@@ -5,6 +5,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct RoutedRequest {
     pub route: config::Route,
+    pub authority: config::Authority,
     pub request: Request<Incoming>,
 }
 
@@ -13,7 +14,7 @@ pub async fn send(
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let protocol = routed.route.protocol.clone();
     let timeout_ms = routed.route.timeout_ms;
-    let stream = connector::connect(&routed.route).await?;
+    let stream = connector::connect(&routed.route, &routed.authority).await?;
 
     let response = async move {
         match stream {

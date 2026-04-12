@@ -8,15 +8,18 @@ pub enum UpstreamStream {
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
 }
 
-pub async fn connect(route: &config::Route) -> Result<UpstreamStream, entity::GatewayError> {
-    let port = route.authority.port.parse::<u16>().map_err(|err| {
+pub async fn connect(
+    route: &config::Route,
+    authority: &config::Authority,
+) -> Result<UpstreamStream, entity::GatewayError> {
+    let port = authority.port.parse::<u16>().map_err(|err| {
         entity::GatewayError::InvalidRouteConfig(format!(
             "invalid route port '{}': {}",
-            route.authority.port, err
+            authority.port, err
         ))
     })?;
 
-    let stream = tokio::net::TcpStream::connect((route.authority.host.as_str(), port)).await?;
+    let stream = tokio::net::TcpStream::connect((authority.host.as_str(), port)).await?;
 
     if matches!(route.protocol, config::Protocol::H2) && route.scheme != "https" {
         return Err(entity::GatewayError::InvalidRouteConfig(
@@ -26,7 +29,9 @@ pub async fn connect(route: &config::Route) -> Result<UpstreamStream, entity::Ga
 
     match route.scheme.as_str() {
         "http" => Ok(UpstreamStream::Plain(stream)),
-        "https" => Ok(UpstreamStream::Tls(connect_tls(route, stream).await?)),
+        "https" => Ok(UpstreamStream::Tls(
+            connect_tls(route, authority, stream).await?,
+        )),
         scheme => Err(entity::GatewayError::InvalidRouteConfig(format!(
             "unsupported route scheme '{}'",
             scheme
@@ -36,13 +41,18 @@ pub async fn connect(route: &config::Route) -> Result<UpstreamStream, entity::Ga
 
 async fn connect_tls(
     route: &config::Route,
+    authority: &config::Authority,
     stream: tokio::net::TcpStream,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, entity::GatewayError> {
-    let server_name = tls_server_name(&route.authority.host)?;
-    let client_config = tls::build_client_config(&route.protocol, route.tls.ca_cert_path.as_deref())?;
+    let server_name = tls_server_name(&authority.host)?;
+    let client_config =
+        tls::build_client_config(&route.protocol, route.tls.ca_cert_path.as_deref())?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
 
-    connector.connect(server_name, stream).await.map_err(Into::into)
+    connector
+        .connect(server_name, stream)
+        .await
+        .map_err(Into::into)
 }
 
 fn tls_server_name(host: &str) -> Result<ServerName<'static>, entity::GatewayError> {
@@ -69,6 +79,7 @@ mod tests {
                 host: host.to_string(),
                 port: port.to_string(),
             },
+            upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             path: "/".to_string(),
@@ -86,7 +97,8 @@ mod tests {
             let _ = listener.accept().await.expect("accepted connection");
         });
 
-        let stream = connect(&sample_route("localhost", &port.to_string()))
+        let route = sample_route("localhost", &port.to_string());
+        let stream = connect(&route, &route.authority)
             .await
             .expect("hostname should resolve");
 
@@ -97,7 +109,7 @@ mod tests {
     #[test]
     fn rejects_invalid_port() {
         let route = sample_route("localhost", "abc");
-        let err = connect(&route);
+        let err = connect(&route, &route.authority);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

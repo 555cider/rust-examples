@@ -40,6 +40,8 @@ pub struct Route {
     pub protocol: Protocol,
     pub authority: Authority,
     #[serde(default)]
+    pub upstreams: Arc<[Authority]>,
+    #[serde(default)]
     pub tls: RouteTlsConfig,
     #[serde(default = "default_route_timeout_ms")]
     pub timeout_ms: u64,
@@ -228,6 +230,28 @@ routes:
     }
 
     #[test]
+    fn parses_additional_upstreams() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: 127.0.0.1
+      port: 8001
+    upstreams:
+      - host: 127.0.0.1
+        port: 8002
+    path: /
+"#,
+        )
+        .expect("upstreams config should parse");
+
+        assert_eq!(config.routes[0].upstreams.len(), 1);
+        assert_eq!(config.routes[0].upstreams[0].port, "8002");
+    }
+
+    #[test]
     fn rejects_unknown_protocol() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -270,6 +294,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8001".to_string(),
                 },
+                upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 path: "/".to_string(),
@@ -281,6 +306,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8002".to_string(),
                 },
+                upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 path: "/h2".to_string(),

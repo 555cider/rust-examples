@@ -1,5 +1,5 @@
-pub mod connector;
 pub mod config;
+pub mod connector;
 pub mod entity;
 pub mod logger;
 pub mod route;
