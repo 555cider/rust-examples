@@ -15,6 +15,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
     #[serde(default)]
+    pub discovery: DiscoveryConfig,
+    #[serde(default)]
     pub management: ManagementConfig,
 }
 
@@ -23,6 +25,7 @@ impl Default for ServerConfig {
         Self {
             listen: default_listen_addr(),
             tls: None,
+            discovery: DiscoveryConfig::default(),
             management: ManagementConfig::default(),
         }
     }
@@ -41,6 +44,8 @@ pub struct Route {
     pub scheme: String,
     pub protocol: Protocol,
     pub authority: Authority,
+    #[serde(default)]
+    pub discovery: Option<RouteDiscoveryConfig>,
     #[serde(default)]
     pub upstreams: Arc<[Authority]>,
     #[serde(default)]
@@ -79,6 +84,43 @@ pub struct Authority {
     pub host: String,
     #[serde(deserialize_with = "deserialize_string_like")]
     pub port: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct DiscoveryConfig {
+    #[serde(default = "default_discovery_refresh_ms")]
+    pub refresh_ms: u64,
+    #[serde(default)]
+    pub consul: Option<ConsulDiscoveryConfig>,
+    #[serde(default)]
+    pub eureka: Option<EurekaDiscoveryConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct ConsulDiscoveryConfig {
+    pub address: String,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default = "default_consul_passing_only")]
+    pub passing_only: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct EurekaDiscoveryConfig {
+    pub service_url: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub prefer_ip_address: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct RouteDiscoveryConfig {
+    pub service: String,
+    #[serde(default)]
+    pub port_override: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -143,6 +185,14 @@ fn default_route_retry_backoff_ms() -> u64 {
 
 fn default_rate_limit_key_header() -> String {
     "api-key".to_string()
+}
+
+fn default_discovery_refresh_ms() -> u64 {
+    5_000
+}
+
+fn default_consul_passing_only() -> bool {
+    true
 }
 
 fn deserialize_string_like<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -302,7 +352,7 @@ fn parse_route_definition(value: serde_yaml::Value) -> Result<Route, String> {
 
 fn convert_scg_route(route: ScgRouteDefinition) -> Result<Route, String> {
     let metadata = parse_scg_metadata(&route.metadata)?;
-    let (scheme, protocol, authority) = parse_scg_uri(route.id.as_deref(), &route.uri, &metadata)?;
+    let parsed_uri = parse_scg_uri(route.id.as_deref(), &route.uri, &metadata)?;
 
     let mut path = "/".to_string();
     let mut hosts = Vec::new();
@@ -406,9 +456,10 @@ fn convert_scg_route(route: ScgRouteDefinition) -> Result<Route, String> {
     }
 
     Ok(Route {
-        scheme,
-        protocol,
-        authority,
+        scheme: parsed_uri.scheme,
+        protocol: parsed_uri.protocol,
+        authority: parsed_uri.authority,
+        discovery: parsed_uri.discovery,
         upstreams: Arc::from([]),
         hosts: Arc::from(hosts),
         methods: Arc::from(methods),
@@ -552,11 +603,18 @@ fn join_path_prefix(prefix: &str, remainder: &str) -> String {
     }
 }
 
+struct ParsedScgUri {
+    scheme: String,
+    protocol: Protocol,
+    authority: Authority,
+    discovery: Option<RouteDiscoveryConfig>,
+}
+
 fn parse_scg_uri(
     route_id: Option<&str>,
     uri: &str,
     metadata: &ScgMetadata,
-) -> Result<(String, Protocol, Authority), String> {
+) -> Result<ParsedScgUri, String> {
     let parsed: hyper::Uri = uri.parse().map_err(|err| {
         format!(
             "invalid scg uri '{}' for route '{}': {}",
@@ -587,25 +645,42 @@ fn parse_scg_uri(
         .to_string();
 
     match scheme {
-        "http" => Ok((
-            "http".to_string(),
-            metadata.protocol.clone().unwrap_or(Protocol::Http1),
-            Authority { host, port },
-        )),
-        "https" => Ok((
-            "https".to_string(),
-            metadata.protocol.clone().unwrap_or(Protocol::Http1),
-            Authority { host, port },
-        )),
-        "h2c" => Ok(("http".to_string(), Protocol::H2c, Authority { host, port })),
-        "lb" => Ok((
-            metadata
+        "http" => Ok(ParsedScgUri {
+            scheme: "http".to_string(),
+            protocol: metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            authority: Authority { host, port },
+            discovery: None,
+        }),
+        "https" => Ok(ParsedScgUri {
+            scheme: "https".to_string(),
+            protocol: metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            authority: Authority { host, port },
+            discovery: None,
+        }),
+        "h2c" => Ok(ParsedScgUri {
+            scheme: "http".to_string(),
+            protocol: Protocol::H2c,
+            authority: Authority { host, port },
+            discovery: None,
+        }),
+        "lb" => Ok(ParsedScgUri {
+            scheme: metadata
                 .scheme
                 .clone()
                 .unwrap_or_else(|| "http".to_string()),
-            metadata.protocol.clone().unwrap_or(Protocol::Http1),
-            Authority { host, port },
-        )),
+            protocol: metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            authority: Authority {
+                host: host.clone(),
+                port: port.clone(),
+            },
+            discovery: Some(RouteDiscoveryConfig {
+                service: host,
+                port_override: authority
+                    .port_u16()
+                    .or(metadata.port)
+                    .map(|value| value.to_string()),
+            }),
+        }),
         other => Err(format!(
             "unsupported scg uri scheme '{}' for route '{}'",
             other,
@@ -875,6 +950,74 @@ routes:
     }
 
     #[test]
+    fn parses_server_consul_discovery_config() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  discovery:
+    refresh_ms: 2500
+    consul:
+      address: http://127.0.0.1:8500
+      token: consul-token
+      passing_only: false
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("consul discovery config should parse");
+
+        assert_eq!(config.server.discovery.refresh_ms, 2500);
+        let consul = config
+            .server
+            .discovery
+            .consul
+            .as_ref()
+            .expect("consul config");
+        assert_eq!(consul.address, "http://127.0.0.1:8500");
+        assert_eq!(consul.token.as_deref(), Some("consul-token"));
+        assert!(!consul.passing_only);
+    }
+
+    #[test]
+    fn parses_server_eureka_discovery_config() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  discovery:
+    eureka:
+      service_url: http://127.0.0.1:8761/eureka/v2/apps
+      username: admin
+      password: secret
+      prefer_ip_address: true
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("eureka discovery config should parse");
+
+        let eureka = config
+            .server
+            .discovery
+            .eureka
+            .as_ref()
+            .expect("eureka config");
+        assert_eq!(eureka.service_url, "http://127.0.0.1:8761/eureka/v2/apps");
+        assert_eq!(eureka.username.as_deref(), Some("admin"));
+        assert_eq!(eureka.password.as_deref(), Some("secret"));
+        assert!(eureka.prefer_ip_address);
+    }
+
+    #[test]
     fn parses_scg_style_routes() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -959,6 +1102,31 @@ spring:
         assert_eq!(route.authority.host, "inventory.internal");
         assert_eq!(route.authority.port, "8443");
         assert_eq!(route.path, "/inventory");
+        let discovery = route.discovery.as_ref().expect("discovery config");
+        assert_eq!(discovery.service, "inventory.internal");
+        assert_eq!(discovery.port_override.as_deref(), Some("8443"));
+    }
+
+    #[test]
+    fn parses_scg_lb_uri_without_port_override() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: orders
+          uri: lb://orders
+          predicates:
+            - Path=/orders/**
+"#,
+        )
+        .expect("scg lb route should parse");
+
+        let route = &config.routes[0];
+        let discovery = route.discovery.as_ref().expect("discovery config");
+        assert_eq!(discovery.service, "orders");
+        assert_eq!(discovery.port_override, None);
     }
 
     #[test]
@@ -1358,6 +1526,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8001".to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
@@ -1382,6 +1551,7 @@ route:
                     host: "127.0.0.1".to_string(),
                     port: "8002".to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),

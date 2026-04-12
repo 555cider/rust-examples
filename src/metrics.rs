@@ -96,6 +96,7 @@ fn error_kind(error: &entity::GatewayError) -> String {
         entity::GatewayError::Io(_) => "Io",
         entity::GatewayError::Http(_) => "Http",
         entity::GatewayError::Timeout(_) => "Timeout",
+        entity::GatewayError::Discovery(_) => "Discovery",
         entity::GatewayError::RouteNotFound(_) => "RouteNotFound",
         entity::GatewayError::CircuitOpen(_) => "CircuitOpen",
         entity::GatewayError::InvalidRouteConfig(_) => "InvalidRouteConfig",

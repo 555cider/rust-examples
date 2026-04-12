@@ -1,4 +1,4 @@
-use crate::{config, connector, entity, route};
+use crate::{config, connector, discovery, entity, route};
 use http_body_util::Full;
 use hyper::{body::Bytes, header::HOST, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -27,6 +27,7 @@ struct CircuitBreakerState {
 
 pub async fn send(
     routed: RoutedRequest,
+    discovery_registry: discovery::DiscoveryRegistry,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let circuit_breaker = validate_circuit_breaker_config(&routed.route)?;
     enforce_circuit_breaker(&routed.route, circuit_breaker)?;
@@ -38,7 +39,7 @@ pub async fn send(
         let authority = route::authority_for_attempt(&routed.route, routed.start_index, attempt);
         let request = build_attempt_request(&routed, authority)?;
 
-        match send_attempt(&routed.route, authority, request).await {
+        match send_attempt(&routed.route, authority, request, &discovery_registry).await {
             Ok(response)
                 if should_retry_status(response.status(), &routed.route)
                     && attempt + 1 < max_attempts =>
@@ -105,11 +106,12 @@ async fn send_attempt(
     route: &config::Route,
     authority: &config::Authority,
     request: Request<Full<Bytes>>,
+    discovery_registry: &discovery::DiscoveryRegistry,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let protocol = route.protocol.clone();
     let timeout_ms = route.timeout_ms;
     let response_header_filter = route.response_header_filter.clone();
-    let stream = connector::connect(route, authority).await?;
+    let stream = connector::connect(route, authority, discovery_registry).await?;
 
     let response = async move {
         match stream {

@@ -1,10 +1,22 @@
 use crate::{config, entity};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::sync::Once;
+
+pub fn ensure_crypto_provider() {
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install rustls crypto provider");
+    });
+}
 
 pub fn build_client_config(
     protocol: &config::Protocol,
     ca_cert_path: Option<&str>,
 ) -> Result<rustls::ClientConfig, entity::GatewayError> {
+    ensure_crypto_provider();
     let root_store = build_client_root_store(ca_cert_path)?;
     let mut client_config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
@@ -36,6 +48,7 @@ pub fn build_client_root_store(
 pub fn build_server_config(
     server_tls: &config::ServerTlsConfig,
 ) -> Result<rustls::ServerConfig, entity::GatewayError> {
+    ensure_crypto_provider();
     let cert_path = server_tls.cert_path.as_deref().ok_or_else(|| {
         entity::GatewayError::InvalidRouteConfig(
             "server tls requires a certificate path".to_string(),

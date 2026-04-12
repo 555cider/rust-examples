@@ -1,6 +1,8 @@
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::{body::Bytes, Request, Response, StatusCode};
-use hyper_gateway::{config, config::Protocol, entity, logger, metrics, route, throttle, trace};
+use hyper_gateway::{
+    config, config::Protocol, discovery, entity, logger, metrics, route, throttle, trace,
+};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::{
@@ -116,7 +118,14 @@ struct SpawnedDedicatedManagementGateway {
 
 impl SpawnedGateway {
     async fn finish(mut self) {
-        self.task.take().unwrap().await.unwrap();
+        if let Some(task) = self.task.take() {
+            if task.is_finished() {
+                task.await.unwrap();
+            } else {
+                task.abort();
+                let _ = task.await;
+            }
+        }
         let db_path = self.db_guard.path().clone();
         drop(self);
         assert_temp_db_artifacts_removed(&db_path);
@@ -157,6 +166,12 @@ struct TlsFixture {
     key_path: PathBuf,
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct RegistryInstance {
+    host: String,
+    port: u16,
 }
 
 impl SpawnedUpstream {
@@ -231,28 +246,70 @@ async fn spawn_gateway_once(route_config: config::Route, db_path: PathBuf) -> Sp
     spawn_gateway_with_routes(Arc::from([route_config]), db_path).await
 }
 
+async fn spawn_gateway_with_gateway_config(
+    gateway_config: config::GatewayConfig,
+    db_path: PathBuf,
+) -> SpawnedGateway {
+    spawn_gateway_with_settings(
+        gateway_config.routes,
+        db_path,
+        gateway_config.server.management,
+        gateway_config.server.discovery,
+    )
+    .await
+}
+
 async fn spawn_gateway_with_routes(
     routes: Arc<[config::Route]>,
     db_path: PathBuf,
 ) -> SpawnedGateway {
+    spawn_gateway_with_settings(
+        routes,
+        db_path,
+        config::ManagementConfig::default(),
+        config::DiscoveryConfig::default(),
+    )
+    .await
+}
+
+async fn spawn_gateway_with_settings(
+    routes: Arc<[config::Route]>,
+    db_path: PathBuf,
+    management_config: config::ManagementConfig,
+    discovery_config: config::DiscoveryConfig,
+) -> SpawnedGateway {
     let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
     let metrics_collector = metrics::new_collector();
+    let discovery_registry = discovery::init(&discovery_config, &routes)
+        .await
+        .expect("discovery registry");
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
 
     let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        route::run(
-            stream,
-            routes,
-            throttle_pool,
-            metrics_collector,
-            config::ManagementConfig::default(),
-        )
-        .await
-        .unwrap();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let routes = routes.clone();
+            let throttle_pool = throttle_pool.clone();
+            let metrics_collector = metrics_collector.clone();
+            let management_config = management_config.clone();
+            let discovery_registry = discovery_registry.clone();
+
+            tokio::spawn(async move {
+                route::run(
+                    stream,
+                    routes,
+                    throttle_pool,
+                    metrics_collector,
+                    management_config,
+                    discovery_registry,
+                )
+                .await
+                .unwrap();
+            });
+        }
     });
 
     SpawnedGateway {
@@ -465,6 +522,149 @@ async fn spawn_http1_upstream_with_response_headers() -> SpawnedUpstream {
             .serve_connection(TokioIo::new(stream), service)
             .await
             .ok();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
+async fn spawn_consul_registry(
+    service: &str,
+    instances: Arc<std::sync::Mutex<Vec<RegistryInstance>>>,
+) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let service = service.to_string();
+
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service.clone();
+            let instances = instances.clone();
+
+            tokio::spawn(async move {
+                let svc = hyper::service::service_fn(
+                    move |request: Request<hyper::body::Incoming>| {
+                        let service = service.clone();
+                        let instances = instances.clone();
+                        async move {
+                            let expected_path = format!("/v1/health/service/{}", service);
+                            if request.uri().path() != expected_path {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Full::new(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let payload = instances
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .map(|instance| {
+                                    serde_json::json!({
+                                        "Node": { "Address": instance.host },
+                                        "Service": { "Address": instance.host, "Port": instance.port }
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                                    .body(Full::new(Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await
+                    .ok();
+            });
+        }
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
+async fn spawn_eureka_registry(
+    service: &str,
+    instances: Arc<std::sync::Mutex<Vec<RegistryInstance>>>,
+) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let service = service.to_ascii_uppercase();
+
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service.clone();
+            let instances = instances.clone();
+
+            tokio::spawn(async move {
+                let svc =
+                    hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let service = service.clone();
+                        let instances = instances.clone();
+                        async move {
+                            let expected_path = format!("/eureka/v2/apps/{}", service);
+                            if request.uri().path() != expected_path {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Full::new(Bytes::new()))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let payload = serde_json::json!({
+                                "application": {
+                                    "instance": instances.lock().unwrap().iter().map(|instance| {
+                                        serde_json::json!({
+                                            "hostName": "localhost",
+                                            "ipAddr": instance.host,
+                                            "status": "UP",
+                                            "port": { "$": instance.port, "@enabled": "true" },
+                                            "securePort": { "$": 8443, "@enabled": "false" }
+                                        })
+                                    }).collect::<Vec<_>>()
+                                }
+                            });
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                                    .body(Full::new(Bytes::from(
+                                        serde_json::to_vec(&payload).unwrap(),
+                                    )))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await
+                    .ok();
+            });
+        }
     });
 
     SpawnedUpstream {
@@ -987,6 +1187,10 @@ async fn spawn_tls_gateway_once(
         cert_path: Some(tls_fixture.cert_path.display().to_string()),
         key_path: Some(tls_fixture.key_path.display().to_string()),
     };
+    let discovery_registry =
+        discovery::init(&config::DiscoveryConfig::default(), &[route_config.clone()])
+            .await
+            .expect("discovery registry");
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
         hyper_gateway::tls::build_server_config(&server_tls).expect("server tls config"),
     ));
@@ -1000,6 +1204,7 @@ async fn spawn_tls_gateway_once(
             throttle_pool,
             metrics_collector,
             config::ManagementConfig::default(),
+            discovery_registry,
         )
         .await
         .unwrap();
@@ -1017,31 +1222,13 @@ async fn spawn_gateway_with_management_config(
     db_path: PathBuf,
     management_config: config::ManagementConfig,
 ) -> SpawnedGateway {
-    let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
-    let metrics_collector = metrics::new_collector();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        route::run(
-            stream,
-            routes,
-            throttle_pool,
-            metrics_collector,
-            management_config,
-        )
-        .await
-        .unwrap();
-    });
-
-    SpawnedGateway {
-        addr,
-        task: Some(task),
-        db_guard: TempDbGuard::new(db_path),
-    }
+    spawn_gateway_with_settings(
+        routes,
+        db_path,
+        management_config,
+        config::DiscoveryConfig::default(),
+    )
+    .await
 }
 
 async fn spawn_gateway_with_dedicated_management_listener(
@@ -1051,6 +1238,9 @@ async fn spawn_gateway_with_dedicated_management_listener(
 ) -> SpawnedDedicatedManagementGateway {
     let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
     let metrics_collector = metrics::new_collector();
+    let discovery_registry = discovery::init(&config::DiscoveryConfig::default(), &routes)
+        .await
+        .expect("discovery registry");
     let gateway_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -1062,11 +1252,18 @@ async fn spawn_gateway_with_dedicated_management_listener(
 
     let gateway_routes = routes.clone();
     let gateway_metrics = metrics_collector.clone();
+    let gateway_discovery = discovery_registry.clone();
     let gateway_task = tokio::spawn(async move {
         let (stream, _) = gateway_listener.accept().await.unwrap();
-        route::run_proxy_only(stream, gateway_routes, throttle_pool, gateway_metrics)
-            .await
-            .unwrap();
+        route::run_proxy_only(
+            stream,
+            gateway_routes,
+            throttle_pool,
+            gateway_metrics,
+            gateway_discovery,
+        )
+        .await
+        .unwrap();
     });
 
     let management_routes = routes.clone();
@@ -1103,6 +1300,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1142,6 +1340,7 @@ async fn allows_unlimited_route_without_api_key() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1184,6 +1383,7 @@ async fn rejects_rate_limited_route_without_key_header() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1230,6 +1430,7 @@ async fn returns_too_many_requests_when_route_rate_limit_is_exceeded() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1412,6 +1613,159 @@ spring:
 }
 
 #[tokio::test]
+async fn proxies_consul_backed_lb_route_definition() {
+    let upstream = spawn_http1_upstream_with_body_for_connections(b"consul-discovered", 1).await;
+    let instances = Arc::new(std::sync::Mutex::new(vec![RegistryInstance {
+        host: "127.0.0.1".to_string(),
+        port: upstream.addr.port(),
+    }]));
+    let registry = spawn_consul_registry("products", instances).await;
+    let gateway_config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+server:
+  discovery:
+    refresh_ms: 50
+    consul:
+      address: http://127.0.0.1:{registry_port}
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: products
+          uri: lb://products
+          predicates:
+            - Path=/products/**
+"#,
+        registry_port = registry.addr.port()
+    ))
+    .expect("gateway config");
+    let gateway = spawn_gateway_with_gateway_config(gateway_config, temp_db_path()).await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/products",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"consul-discovered"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+    drop(registry);
+}
+
+#[tokio::test]
+async fn refreshes_consul_backed_discovery_instances() {
+    let upstream_a = spawn_http1_upstream_with_body_for_connections(b"consul-a", 1).await;
+    let upstream_b = spawn_http1_upstream_with_body_for_connections(b"consul-b", 1).await;
+    let instances = Arc::new(std::sync::Mutex::new(vec![RegistryInstance {
+        host: "127.0.0.1".to_string(),
+        port: upstream_a.addr.port(),
+    }]));
+    let registry = spawn_consul_registry("catalog", instances.clone()).await;
+    let gateway_config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+server:
+  discovery:
+    refresh_ms: 50
+    consul:
+      address: http://127.0.0.1:{registry_port}
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: catalog
+          uri: lb://catalog
+          predicates:
+            - Path=/catalog/**
+"#,
+        registry_port = registry.addr.port()
+    ))
+    .expect("gateway config");
+    let gateway = spawn_gateway_with_gateway_config(gateway_config, temp_db_path()).await;
+
+    let (first_status, first_body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/catalog",
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(first_body, Bytes::from_static(b"consul-a"));
+
+    *instances.lock().unwrap() = vec![RegistryInstance {
+        host: "127.0.0.1".to_string(),
+        port: upstream_b.addr.port(),
+    }];
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let (second_status, second_body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/catalog",
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second_body, Bytes::from_static(b"consul-b"));
+
+    gateway.finish().await;
+    upstream_a.finish().await;
+    upstream_b.finish().await;
+    drop(registry);
+}
+
+#[tokio::test]
+async fn proxies_eureka_backed_lb_route_definition() {
+    let upstream = spawn_http1_upstream_with_body_for_connections(b"eureka-discovered", 1).await;
+    let instances = Arc::new(std::sync::Mutex::new(vec![RegistryInstance {
+        host: "127.0.0.1".to_string(),
+        port: upstream.addr.port(),
+    }]));
+    let registry = spawn_eureka_registry("inventory", instances).await;
+    let gateway_config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+server:
+  discovery:
+    refresh_ms: 50
+    eureka:
+      service_url: http://127.0.0.1:{registry_port}/eureka/v2/apps
+      prefer_ip_address: true
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: inventory
+          uri: lb://inventory
+          predicates:
+            - Path=/inventory/**
+"#,
+        registry_port = registry.addr.port()
+    ))
+    .expect("gateway config");
+    let gateway = spawn_gateway_with_gateway_config(gateway_config, temp_db_path()).await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/inventory",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"eureka-discovered"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+    drop(registry);
+}
+
+#[tokio::test]
 async fn serves_management_health_on_dedicated_listener_only() {
     let gateway = spawn_gateway_with_dedicated_management_listener(
         Arc::from([]),
@@ -1462,6 +1816,7 @@ async fn serves_management_routes_on_dedicated_listener() {
                 host: "127.0.0.1".to_string(),
                 port: "8001".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1546,6 +1901,7 @@ async fn serves_management_routes_without_api_key() {
                     host: "127.0.0.1".to_string(),
                     port: "8001".to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -1570,6 +1926,7 @@ async fn serves_management_routes_without_api_key() {
                     host: "example.com".to_string(),
                     port: "443".to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 5_000,
@@ -1630,6 +1987,7 @@ async fn serves_management_metrics_snapshot_for_management_and_proxy_requests() 
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1736,6 +2094,7 @@ async fn serves_management_metrics_snapshot_with_gateway_errors() {
                 host: "127.0.0.1".to_string(),
                 port: unused_port.to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1875,6 +2234,7 @@ async fn round_robins_across_configured_http1_upstreams() {
                 host: upstream_a.addr.ip().to_string(),
                 port: upstream_a.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([config::Authority {
                 host: upstream_b.addr.ip().to_string(),
                 port: upstream_b.addr.port().to_string(),
@@ -1929,6 +2289,7 @@ async fn retries_failed_primary_connection_on_next_upstream() {
                 host: "127.0.0.1".to_string(),
                 port: dead_port.to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([config::Authority {
                 host: backup.addr.ip().to_string(),
                 port: backup.addr.port().to_string(),
@@ -1975,6 +2336,7 @@ async fn retries_retryable_upstream_status_on_next_backend() {
                 host: primary.addr.ip().to_string(),
                 port: primary.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([config::Authority {
                 host: backup.addr.ip().to_string(),
                 port: backup.addr.port().to_string(),
@@ -2020,6 +2382,7 @@ async fn retries_upstream_timeout_on_next_backend() {
                 host: slow.addr.ip().to_string(),
                 port: slow.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([config::Authority {
                 host: backup.addr.ip().to_string(),
                 port: backup.addr.port().to_string(),
@@ -2064,6 +2427,7 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2110,6 +2474,7 @@ async fn applies_request_header_filter_before_forwarding_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2163,6 +2528,7 @@ async fn applies_response_header_filter_before_returning_to_client() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2212,6 +2578,7 @@ async fn selects_host_specific_route() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2236,6 +2603,7 @@ async fn selects_host_specific_route() {
                     host: api_upstream.addr.ip().to_string(),
                     port: api_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2282,6 +2650,7 @@ async fn selects_method_specific_route() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2306,6 +2675,7 @@ async fn selects_method_specific_route() {
                     host: post_upstream.addr.ip().to_string(),
                     port: post_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2357,6 +2727,7 @@ async fn selects_header_specific_route() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2381,6 +2752,7 @@ async fn selects_header_specific_route() {
                     host: header_upstream.addr.ip().to_string(),
                     port: header_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2433,6 +2805,7 @@ async fn selects_query_specific_route() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2457,6 +2830,7 @@ async fn selects_query_specific_route() {
                     host: query_upstream.addr.ip().to_string(),
                     port: query_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -2506,6 +2880,7 @@ async fn supports_https_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2547,6 +2922,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
@@ -2589,6 +2965,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2629,6 +3006,7 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 10,
@@ -2668,6 +3046,7 @@ async fn opens_circuit_breaker_after_transport_failure_and_recovers_after_cooldo
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2781,6 +3160,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2821,6 +3201,7 @@ async fn supports_http1_gateway_to_https_upstream() {
                 host: "localhost".to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
@@ -2867,6 +3248,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
                 host: "127.0.0.1".to_string(),
                 port: unused_port.to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2905,6 +3287,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2944,6 +3327,7 @@ async fn supports_h2c_client_to_http1_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -2983,6 +3367,7 @@ async fn supports_http1_client_to_h2c_upstream() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -3024,6 +3409,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: default_upstream.addr.ip().to_string(),
                     port: default_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -3048,6 +3434,7 @@ async fn supports_multi_route_protocol_selection() {
                     host: h2c_upstream.addr.ip().to_string(),
                     port: h2c_upstream.addr.port().to_string(),
                 },
+                discovery: None,
                 upstreams: Arc::from([]),
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
@@ -3134,6 +3521,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
                 host: upstream.addr.ip().to_string(),
                 port: upstream.addr.port().to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,

@@ -1,4 +1,4 @@
-use hyper_gateway::{config, logger, metrics, route, throttle, tls};
+use hyper_gateway::{config, discovery, logger, metrics, route, throttle, tls};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -12,6 +12,9 @@ async fn main() {
     let management_config = gateway_config.server.management.clone();
     let dedicated_management_addr = management_config.listen.clone();
     let route_config_arr: Arc<[config::Route]> = gateway_config.routes;
+    let discovery_registry = discovery::init(&gateway_config.server.discovery, &route_config_arr)
+        .await
+        .expect("Failed to initialize discovery!");
 
     let throttle_pool: throttle::ThrottlePool =
         throttle::init_throttle().expect("Failed to initialize the throttle!");
@@ -84,6 +87,7 @@ async fn main() {
         let throttle_pool = throttle_pool.clone();
         let metrics_collector = metrics_collector.clone();
         let management_config = management_config.clone();
+        let discovery_registry = discovery_registry.clone();
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
@@ -91,6 +95,7 @@ async fn main() {
             let throttle_pool_for_conn = throttle_pool.clone();
             let metrics_for_conn = metrics_collector.clone();
             let management_for_conn = management_config.clone();
+            let discovery_for_conn = discovery_registry.clone();
 
             let result = match tls_acceptor {
                 Some(tls_acceptor) => match tls_acceptor.accept(gateway_stream).await {
@@ -101,6 +106,7 @@ async fn main() {
                                 route_config_arr_for_conn,
                                 throttle_pool_for_conn,
                                 metrics_for_conn,
+                                discovery_for_conn,
                             )
                             .await
                         } else {
@@ -110,6 +116,7 @@ async fn main() {
                                 throttle_pool_for_conn,
                                 metrics_for_conn,
                                 management_for_conn,
+                                discovery_for_conn,
                             )
                             .await
                         }
@@ -126,6 +133,7 @@ async fn main() {
                             route_config_arr_for_conn,
                             throttle_pool_for_conn,
                             metrics_for_conn,
+                            discovery_for_conn,
                         )
                         .await
                     } else {
@@ -135,6 +143,7 @@ async fn main() {
                             throttle_pool_for_conn,
                             metrics_for_conn,
                             management_for_conn,
+                            discovery_for_conn,
                         )
                         .await
                     }

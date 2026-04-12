@@ -25,6 +25,7 @@ rustls = "0.23"
 rustls-pemfile = "2.2.0"
 tokio-rustls = "0.26.2"
 webpki-roots = "0.26.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider"] }
 
 [dev-dependencies]
 rcgen = "0.13.2"

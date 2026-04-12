@@ -1,4 +1,4 @@
-use crate::{config, entity, tls};
+use crate::{config, discovery, entity, tls};
 use rustls::pki_types::ServerName;
 use std::{
     collections::HashMap,
@@ -16,8 +16,15 @@ pub enum UpstreamStream {
 pub async fn connect(
     route: &config::Route,
     authority: &config::Authority,
+    discovery_registry: &discovery::DiscoveryRegistry,
 ) -> Result<UpstreamStream, entity::GatewayError> {
-    let selected_addr = select_connect_socket_addr(authority).await?;
+    let resolved_authority =
+        if let Some(discovered) = discovery::next_authority(discovery_registry, route).await? {
+            discovered
+        } else {
+            authority.clone()
+        };
+    let selected_addr = select_connect_socket_addr(&resolved_authority).await?;
     let stream = tokio::net::TcpStream::connect(selected_addr).await?;
 
     if matches!(route.protocol, config::Protocol::H2) && route.scheme != "https" {
@@ -29,7 +36,7 @@ pub async fn connect(
     match route.scheme.as_str() {
         "http" => Ok(UpstreamStream::Plain(stream)),
         "https" => Ok(UpstreamStream::Tls(
-            connect_tls(route, authority, stream).await?,
+            connect_tls(route, &resolved_authority, stream).await?,
         )),
         scheme => Err(entity::GatewayError::InvalidRouteConfig(format!(
             "unsupported route scheme '{}'",
@@ -144,6 +151,7 @@ mod tests {
                 host: host.to_string(),
                 port: port.to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -175,7 +183,7 @@ mod tests {
         });
 
         let route = sample_route("localhost", &port.to_string());
-        let stream = connect(&route, &route.authority)
+        let stream = connect(&route, &route.authority, &None)
             .await
             .expect("hostname should resolve");
 
@@ -186,7 +194,7 @@ mod tests {
     #[test]
     fn rejects_invalid_port() {
         let route = sample_route("localhost", "abc");
-        let err = connect(&route, &route.authority);
+        let err = connect(&route, &route.authority, &None);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

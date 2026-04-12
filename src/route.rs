@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{config, entity, metrics, throttle, trace, upstream};
+use crate::{config, discovery, entity, metrics, throttle, trace, upstream};
 use http_body_util::BodyExt;
 use hyper::{
     body::{Bytes, Incoming},
@@ -24,6 +24,7 @@ pub async fn run(
     throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
+    discovery_registry: discovery::DiscoveryRegistry,
 ) -> Result<(), entity::GatewayError> {
     serve_connection_with_management(
         gateway_stream,
@@ -31,6 +32,7 @@ pub async fn run(
         throttle_pool_clone,
         metrics_collector,
         management_config,
+        discovery_registry,
         true,
     )
     .await
@@ -41,6 +43,7 @@ pub async fn run_proxy_only<T>(
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
+    discovery_registry: discovery::DiscoveryRegistry,
 ) -> Result<(), entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -51,6 +54,7 @@ where
         throttle_pool_clone,
         metrics_collector,
         config::ManagementConfig::default(),
+        discovery_registry,
         false,
     )
     .await
@@ -62,6 +66,7 @@ pub async fn serve_connection<T>(
     throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
+    discovery_registry: discovery::DiscoveryRegistry,
 ) -> Result<(), entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -72,6 +77,7 @@ where
         throttle_pool_clone,
         metrics_collector,
         management_config,
+        discovery_registry,
         true,
     )
     .await
@@ -83,6 +89,7 @@ async fn serve_connection_with_management<T>(
     throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
+    discovery_registry: discovery::DiscoveryRegistry,
     management_enabled: bool,
 ) -> Result<(), entity::GatewayError>
 where
@@ -94,6 +101,7 @@ where
         throttle_pool_clone,
         metrics_collector,
         management_config,
+        discovery_registry,
         management_enabled,
     )
     .await
@@ -105,6 +113,7 @@ async fn serve_connection_inner<T>(
     throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
+    discovery_registry: discovery::DiscoveryRegistry,
     management_enabled: bool,
 ) -> Result<(), entity::GatewayError>
 where
@@ -115,6 +124,7 @@ where
         let throttle_pool = throttle_pool_clone.clone();
         let metrics_collector = metrics_collector.clone();
         let management_config = management_config.clone();
+        let discovery_registry = discovery_registry.clone();
         let management_enabled = management_enabled;
 
         async move {
@@ -164,19 +174,21 @@ where
 
                     let route_path = matched_route.route.path.clone();
                     match prepare_routed_request(incoming_request, matched_route).await {
-                        Ok(routed) => match upstream::send(routed).await {
-                            Ok(response) => {
-                                metrics::record(
-                                    &metrics_collector,
-                                    &route_path,
-                                    response.status(),
-                                    request_started_at.elapsed(),
-                                    None,
-                                );
-                                Ok(response)
+                        Ok(routed) => {
+                            match upstream::send(routed, discovery_registry.clone()).await {
+                                Ok(response) => {
+                                    metrics::record(
+                                        &metrics_collector,
+                                        &route_path,
+                                        response.status(),
+                                        request_started_at.elapsed(),
+                                        None,
+                                    );
+                                    Ok(response)
+                                }
+                                Err(err) => Err((route_path, err)),
                             }
-                            Err(err) => Err((route_path, err)),
-                        },
+                        }
                         Err(err) => Err((route_path, err)),
                     }
                 }
@@ -246,6 +258,7 @@ pub fn gateway_response_for_error(
         entity::GatewayError::Hyper(_)
         | entity::GatewayError::Io(_)
         | entity::GatewayError::Http(_)
+        | entity::GatewayError::Discovery(_)
         | entity::GatewayError::InvalidRouteConfig(_) => hyper::http::StatusCode::BAD_GATEWAY,
     };
 
@@ -677,6 +690,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -715,6 +729,7 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -745,6 +760,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -780,6 +796,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -824,6 +841,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -864,6 +882,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -904,6 +923,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -943,6 +963,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
@@ -1032,6 +1053,7 @@ mod tests {
                 host: "::1".to_string(),
                 port: "9000".to_string(),
             },
+            discovery: None,
             upstreams: Arc::from([]),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
