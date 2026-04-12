@@ -1,5 +1,6 @@
 /target
+.worktrees/
+/worktrees/
 .env
 .env.*
 .DS_Store
-
