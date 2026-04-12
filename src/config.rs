@@ -120,6 +120,8 @@ pub struct ServerTlsConfig {
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct ManagementConfig {
     #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
     pub auth_token: Option<String>,
 }
 
@@ -229,6 +231,30 @@ routes:
         assert_eq!(
             config.server.management.auth_token.as_deref(),
             Some("secret-token")
+        );
+    }
+
+    #[test]
+    fn parses_server_management_listen() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  management:
+    listen: 127.0.0.1:9000
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("management listen config should parse");
+
+        assert_eq!(
+            config.server.management.listen.as_deref(),
+            Some("127.0.0.1:9000")
         );
     }
 

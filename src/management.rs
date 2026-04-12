@@ -1,10 +1,72 @@
 use crate::{config, entity, metrics};
 use hyper::{body::Bytes, Method, Request, Response, StatusCode};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder as AutoBuilder,
+};
 use serde::Serialize;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 const HEALTH_PATH: &str = "/__gateway/health";
 const ROUTES_PATH: &str = "/__gateway/routes";
 const METRICS_PATH: &str = "/__gateway/metrics";
+
+pub async fn run<T>(
+    gateway_stream: T,
+    routes: Arc<[config::Route]>,
+    metrics_collector: metrics::MetricsCollector,
+    management_config: config::ManagementConfig,
+) -> Result<(), entity::GatewayError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service =
+        hyper::service::service_fn(move |incoming_request: Request<hyper::body::Incoming>| {
+            let routes = routes.clone();
+            let metrics_collector = metrics_collector.clone();
+            let management_config = management_config.clone();
+
+            async move {
+                let request_path = incoming_request.uri().path().to_string();
+                let request_started_at = Instant::now();
+
+                if let Some(response) = handle(
+                    &incoming_request,
+                    &routes,
+                    &metrics_collector,
+                    &management_config,
+                )? {
+                    if !is_metrics_path(&request_path) {
+                        metrics::record(
+                            &metrics_collector,
+                            &request_path,
+                            response.status(),
+                            request_started_at.elapsed(),
+                            None,
+                        );
+                    }
+                    return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
+                }
+
+                let response = entity::get_gateway_response(StatusCode::NOT_FOUND);
+                metrics::record(
+                    &metrics_collector,
+                    "__unmatched",
+                    response.status(),
+                    request_started_at.elapsed(),
+                    None,
+                );
+                Ok(response)
+            }
+        });
+
+    AutoBuilder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(gateway_stream), service)
+        .await
+        .map_err(|err| entity::GatewayError::Io(std::io::Error::other(err)))
+}
 
 pub fn handle(
     request: &Request<hyper::body::Incoming>,
@@ -31,6 +93,10 @@ pub fn handle(
 
 pub fn is_metrics_path(path: &str) -> bool {
     path == METRICS_PATH
+}
+
+pub fn is_management_path(path: &str) -> bool {
+    matches!(path, HEALTH_PATH | ROUTES_PATH | METRICS_PATH)
 }
 
 fn handle_health(method: &Method) -> Response<entity::GatewayBody> {

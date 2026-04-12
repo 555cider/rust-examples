@@ -106,9 +106,41 @@ struct SpawnedGateway {
     db_guard: TempDbGuard,
 }
 
+struct SpawnedDedicatedManagementGateway {
+    gateway_addr: std::net::SocketAddr,
+    management_addr: std::net::SocketAddr,
+    gateway_task: Option<JoinHandle<()>>,
+    management_task: Option<JoinHandle<()>>,
+    db_guard: TempDbGuard,
+}
+
 impl SpawnedGateway {
     async fn finish(mut self) {
         self.task.take().unwrap().await.unwrap();
+        let db_path = self.db_guard.path().clone();
+        drop(self);
+        assert_temp_db_artifacts_removed(&db_path);
+    }
+}
+
+impl SpawnedDedicatedManagementGateway {
+    async fn finish(mut self) {
+        if let Some(task) = self.gateway_task.take() {
+            if task.is_finished() {
+                task.await.unwrap();
+            } else {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        if let Some(task) = self.management_task.take() {
+            if task.is_finished() {
+                task.await.unwrap();
+            } else {
+                task.abort();
+                let _ = task.await;
+            }
+        }
         let db_path = self.db_guard.path().clone();
         drop(self);
         assert_temp_db_artifacts_removed(&db_path);
@@ -142,6 +174,19 @@ impl Drop for TempDbGuard {
 impl Drop for SpawnedGateway {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
+            task.abort();
+        }
+
+        let _ = self.db_guard.cleanup_with_retry();
+    }
+}
+
+impl Drop for SpawnedDedicatedManagementGateway {
+    fn drop(&mut self) {
+        if let Some(task) = self.gateway_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.management_task.take() {
             task.abort();
         }
 
@@ -206,8 +251,8 @@ async fn spawn_gateway_with_routes(
             metrics_collector,
             config::ManagementConfig::default(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
     });
 
     SpawnedGateway {
@@ -999,6 +1044,54 @@ async fn spawn_gateway_with_management_config(
     }
 }
 
+async fn spawn_gateway_with_dedicated_management_listener(
+    routes: Arc<[config::Route]>,
+    db_path: PathBuf,
+    management_config: config::ManagementConfig,
+) -> SpawnedDedicatedManagementGateway {
+    let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
+    let metrics_collector = metrics::new_collector();
+    let gateway_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    let management_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let management_addr = management_listener.local_addr().unwrap();
+
+    let gateway_routes = routes.clone();
+    let gateway_metrics = metrics_collector.clone();
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gateway_listener.accept().await.unwrap();
+        route::run_proxy_only(stream, gateway_routes, throttle_pool, gateway_metrics)
+            .await
+            .unwrap();
+    });
+
+    let management_routes = routes.clone();
+    let management_metrics = metrics_collector.clone();
+    let management_task = tokio::spawn(async move {
+        let (stream, _) = management_listener.accept().await.unwrap();
+        hyper_gateway::management::run(
+            stream,
+            management_routes,
+            management_metrics,
+            management_config,
+        )
+        .await
+        .unwrap();
+    });
+
+    SpawnedDedicatedManagementGateway {
+        gateway_addr,
+        management_addr,
+        gateway_task: Some(gateway_task),
+        management_task: Some(management_task),
+        db_guard: TempDbGuard::new(db_path),
+    }
+}
+
 #[tokio::test]
 async fn supports_http1_gateway_to_http1_upstream() {
     let upstream = spawn_http1_upstream().await;
@@ -1210,6 +1303,130 @@ async fn serves_management_health_without_api_key_or_upstream() {
         Some("application/json")
     );
     assert_eq!(body, Bytes::from_static(br#"{"status":"UP"}"#));
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_health_on_dedicated_listener_only() {
+    let gateway = spawn_gateway_with_dedicated_management_listener(
+        Arc::from([]),
+        temp_db_path(),
+        config::ManagementConfig {
+            listen: Some("127.0.0.1:9000".to_string()),
+            auth_token: None,
+        },
+    )
+    .await;
+
+    let (management_status, headers, body) = send_http1_request_without_api_key(
+        gateway.management_addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/health",
+    )
+    .await;
+    assert_eq!(management_status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert_eq!(body, Bytes::from_static(br#"{"status":"UP"}"#));
+
+    let (gateway_status, _, gateway_body) = send_http1_request_without_api_key(
+        gateway.gateway_addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/health",
+    )
+    .await;
+    assert_eq!(gateway_status, StatusCode::NOT_FOUND);
+    assert!(gateway_body.is_empty());
+
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_routes_on_dedicated_listener() {
+    let gateway = spawn_gateway_with_dedicated_management_listener(
+        Arc::from([config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "127.0.0.1".to_string(),
+                port: "8001".to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: None,
+            hosts: Arc::from(["api.example.com".to_string()]),
+            methods: Arc::from(["GET".to_string()]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/api".to_string(),
+        }]),
+        temp_db_path(),
+        config::ManagementConfig {
+            listen: Some("127.0.0.1:9000".to_string()),
+            auth_token: None,
+        },
+    )
+    .await;
+
+    let (status, headers, body) = send_http1_request_without_api_key(
+        gateway.management_addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/routes",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    let body = String::from_utf8(body.to_vec()).expect("utf8 json body");
+    assert!(body.contains(r#""path":"/api""#));
+    assert!(body.contains(r#""hosts":["api.example.com"]"#));
+
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn returns_not_found_for_non_management_path_on_dedicated_listener() {
+    let gateway = spawn_gateway_with_dedicated_management_listener(
+        Arc::from([]),
+        temp_db_path(),
+        config::ManagementConfig {
+            listen: Some("127.0.0.1:9000".to_string()),
+            auth_token: None,
+        },
+    )
+    .await;
+
+    let (status, _, body) = send_http1_request_without_api_key(
+        gateway.management_addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.is_empty());
+
     gateway.finish().await;
 }
 
@@ -1482,6 +1699,7 @@ async fn rejects_management_requests_without_configured_bearer_token() {
         Arc::from([]),
         temp_db_path(),
         config::ManagementConfig {
+            listen: None,
             auth_token: Some("secret-token".to_string()),
         },
     )
@@ -1513,6 +1731,7 @@ async fn serves_management_requests_with_configured_bearer_token() {
         Arc::from([]),
         temp_db_path(),
         config::ManagementConfig {
+            listen: None,
             auth_token: Some("secret-token".to_string()),
         },
     )
@@ -1639,8 +1858,10 @@ async fn retries_failed_primary_connection_on_next_upstream() {
 
 #[tokio::test]
 async fn retries_retryable_upstream_status_on_next_backend() {
-    let primary = spawn_http1_upstream_with_status_sequence(vec![StatusCode::SERVICE_UNAVAILABLE]).await;
-    let backup = spawn_http1_upstream_with_body_for_connections(b"retryable-status-backup", 1).await;
+    let primary =
+        spawn_http1_upstream_with_status_sequence(vec![StatusCode::SERVICE_UNAVAILABLE]).await;
+    let backup =
+        spawn_http1_upstream_with_body_for_connections(b"retryable-status-backup", 1).await;
     let gateway = spawn_gateway_once(
         config::Route {
             scheme: "http".to_string(),

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+    time::Instant,
+};
 
 use crate::{config, entity, metrics, throttle, trace, upstream};
 use http_body_util::BodyExt;
@@ -21,12 +25,33 @@ pub async fn run(
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
 ) -> Result<(), entity::GatewayError> {
-    serve_connection(
+    serve_connection_with_management(
         gateway_stream,
         route_config_arr_clone,
         throttle_pool_clone,
         metrics_collector,
         management_config,
+        true,
+    )
+    .await
+}
+
+pub async fn run_proxy_only<T>(
+    gateway_stream: T,
+    route_config_arr_clone: Arc<[config::Route]>,
+    throttle_pool_clone: throttle::ThrottlePool,
+    metrics_collector: metrics::MetricsCollector,
+) -> Result<(), entity::GatewayError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_with_management(
+        gateway_stream,
+        route_config_arr_clone,
+        throttle_pool_clone,
+        metrics_collector,
+        config::ManagementConfig::default(),
+        false,
     )
     .await
 }
@@ -41,39 +66,88 @@ pub async fn serve_connection<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    serve_connection_with_management(
+        gateway_stream,
+        route_config_arr_clone,
+        throttle_pool_clone,
+        metrics_collector,
+        management_config,
+        true,
+    )
+    .await
+}
+
+async fn serve_connection_with_management<T>(
+    gateway_stream: T,
+    route_config_arr_clone: Arc<[config::Route]>,
+    throttle_pool_clone: throttle::ThrottlePool,
+    metrics_collector: metrics::MetricsCollector,
+    management_config: config::ManagementConfig,
+    management_enabled: bool,
+) -> Result<(), entity::GatewayError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_inner(
+        gateway_stream,
+        route_config_arr_clone,
+        throttle_pool_clone,
+        metrics_collector,
+        management_config,
+        management_enabled,
+    )
+    .await
+}
+
+async fn serve_connection_inner<T>(
+    gateway_stream: T,
+    route_config_arr_clone: Arc<[config::Route]>,
+    throttle_pool_clone: throttle::ThrottlePool,
+    metrics_collector: metrics::MetricsCollector,
+    management_config: config::ManagementConfig,
+    management_enabled: bool,
+) -> Result<(), entity::GatewayError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let service = service_fn(move |incoming_request: Request<Incoming>| {
         let route_config_arr = route_config_arr_clone.clone();
         let throttle_pool = throttle_pool_clone.clone();
         let metrics_collector = metrics_collector.clone();
         let management_config = management_config.clone();
+        let management_enabled = management_enabled;
 
         async move {
             let request_path = incoming_request.uri().path().to_string();
             let request_started_at = Instant::now();
 
-            if let Some(response) = crate::management::handle(
-                &incoming_request,
-                &route_config_arr,
-                &metrics_collector,
-                &management_config,
-            )?
-            {
-                if !crate::management::is_metrics_path(&request_path) {
-                    metrics::record(
-                        &metrics_collector,
-                        &request_path,
-                        response.status(),
-                        request_started_at.elapsed(),
-                        None,
-                    );
+            if management_enabled {
+                if let Some(response) = crate::management::handle(
+                    &incoming_request,
+                    &route_config_arr,
+                    &metrics_collector,
+                    &management_config,
+                )? {
+                    if !crate::management::is_metrics_path(&request_path) {
+                        metrics::record(
+                            &metrics_collector,
+                            &request_path,
+                            response.status(),
+                            request_started_at.elapsed(),
+                            None,
+                        );
+                    }
+                    return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
                 }
-                return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
             }
 
             let response = match match_route_request(&incoming_request, &route_config_arr) {
                 Ok(matched_route) => {
-                    let throttle_status =
-                        throttle::run(&throttle_pool, &matched_route.route, incoming_request.headers())?;
+                    let throttle_status = throttle::run(
+                        &throttle_pool,
+                        &matched_route.route,
+                        incoming_request.headers(),
+                    )?;
 
                     if !throttle_status.is_success() {
                         metrics::record(
@@ -91,18 +165,18 @@ where
                     let route_path = matched_route.route.path.clone();
                     match prepare_routed_request(incoming_request, matched_route).await {
                         Ok(routed) => match upstream::send(routed).await {
-                        Ok(response) => {
-                            metrics::record(
-                                &metrics_collector,
-                                &route_path,
-                                response.status(),
-                                request_started_at.elapsed(),
-                                None,
-                            );
-                            Ok(response)
-                        }
-                        Err(err) => Err((route_path, err)),
-                    },
+                            Ok(response) => {
+                                metrics::record(
+                                    &metrics_collector,
+                                    &route_path,
+                                    response.status(),
+                                    request_started_at.elapsed(),
+                                    None,
+                                );
+                                Ok(response)
+                            }
+                            Err(err) => Err((route_path, err)),
+                        },
                         Err(err) => Err((route_path, err)),
                     }
                 }

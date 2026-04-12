@@ -40,7 +40,8 @@ pub async fn send(
 
         match send_attempt(&routed.route, authority, request).await {
             Ok(response)
-                if should_retry_status(response.status(), &routed.route) && attempt + 1 < max_attempts =>
+                if should_retry_status(response.status(), &routed.route)
+                    && attempt + 1 < max_attempts =>
             {
                 log::warn!(
                     "Upstream attempt {}/{} returned retryable status {} for route '{}'",
@@ -148,7 +149,10 @@ fn should_retry(error: &entity::GatewayError) -> bool {
 }
 
 fn should_retry_status(status: hyper::StatusCode, route: &config::Route) -> bool {
-    route.retry_statuses.iter().any(|code| *code == status.as_u16())
+    route
+        .retry_statuses
+        .iter()
+        .any(|code| *code == status.as_u16())
 }
 
 async fn wait_before_retry(route: &config::Route) {
