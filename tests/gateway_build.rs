@@ -234,7 +234,38 @@ async fn spawn_http1_upstream() -> SpawnedUpstream {
         hyper::server::conn::http1::Builder::new()
             .serve_connection(TokioIo::new(stream), service)
             .await
-            .unwrap();
+            .ok();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
+async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service =
+            hyper::service::service_fn(move |_request: Request<hyper::body::Incoming>| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from_static(b"slow-http1")))
+                        .unwrap(),
+                )
+            });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .ok();
     });
 
     SpawnedUpstream {
@@ -568,6 +599,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -594,6 +626,7 @@ async fn supports_https_client_to_http1_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -623,6 +656,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -649,6 +683,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -659,6 +694,32 @@ async fn supports_https_h2_client_to_http1_upstream() {
     let (status, body) = send_https_h2_request(gateway.addr, &tls_fixture).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"http1"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn returns_gateway_timeout_when_upstream_is_too_slow() {
+    let upstream = spawn_slow_http1_upstream(100).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 10,
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert!(body.is_empty());
     gateway.finish().await;
     upstream.finish().await;
 }
@@ -675,6 +736,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -703,6 +765,7 @@ async fn supports_http1_gateway_to_https_upstream() {
             tls: config::RouteTlsConfig {
                 ca_cert_path: Some(tls_fixture.cert_path.display().to_string()),
             },
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -733,6 +796,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
                 port: unused_port.to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -757,6 +821,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -782,6 +847,7 @@ async fn supports_h2c_client_to_http1_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -807,6 +873,7 @@ async fn supports_http1_client_to_h2c_upstream() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -834,6 +901,7 @@ async fn supports_multi_route_protocol_selection() {
                     port: default_upstream.addr.port().to_string(),
                 },
                 tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
                 path: "/".to_string(),
             },
             config::Route {
@@ -844,6 +912,7 @@ async fn supports_multi_route_protocol_selection() {
                     port: h2c_upstream.addr.port().to_string(),
                 },
                 tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
                 path: "/h2".to_string(),
             },
         ]),
@@ -916,6 +985,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
                 port: upstream.addr.port().to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         },
         db_path.clone(),

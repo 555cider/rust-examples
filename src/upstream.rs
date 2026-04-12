@@ -12,16 +12,23 @@ pub async fn send(
     routed: RoutedRequest,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let protocol = routed.route.protocol.clone();
+    let timeout_ms = routed.route.timeout_ms;
     let stream = connector::connect(&routed.route).await?;
 
-    match stream {
-        connector::UpstreamStream::Plain(stream) => {
-            send_on_io(TokioIo::new(stream), protocol, routed.request).await
+    let response = async move {
+        match stream {
+            connector::UpstreamStream::Plain(stream) => {
+                send_on_io(TokioIo::new(stream), protocol, routed.request).await
+            }
+            connector::UpstreamStream::Tls(stream) => {
+                send_on_io(TokioIo::new(stream), protocol, routed.request).await
+            }
         }
-        connector::UpstreamStream::Tls(stream) => {
-            send_on_io(TokioIo::new(stream), protocol, routed.request).await
-        }
-    }
+    };
+
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), response)
+        .await
+        .map_err(entity::GatewayError::from)?
 }
 
 async fn send_on_io<T>(

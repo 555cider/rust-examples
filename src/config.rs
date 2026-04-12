@@ -41,6 +41,8 @@ pub struct Route {
     pub authority: Authority,
     #[serde(default)]
     pub tls: RouteTlsConfig,
+    #[serde(default = "default_route_timeout_ms")]
+    pub timeout_ms: u64,
     pub path: String,
 }
 
@@ -66,6 +68,10 @@ pub struct ServerTlsConfig {
 
 fn default_listen_addr() -> String {
     "127.0.0.1:8080".to_string()
+}
+
+fn default_route_timeout_ms() -> u64 {
+    30_000
 }
 
 pub fn load_config(path: &str) -> GatewayConfig {
@@ -196,6 +202,32 @@ routes:
     }
 
     #[test]
+    fn parses_route_timeout_and_defaults() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    timeout_ms: 250
+    path: /fast
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8002
+    path: /
+"#,
+        )
+        .expect("timeout config should parse");
+
+        assert_eq!(config.routes[0].timeout_ms, 250);
+        assert_eq!(config.routes[1].timeout_ms, 30_000);
+    }
+
+    #[test]
     fn rejects_unknown_protocol() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -239,6 +271,7 @@ route:
                     port: "8001".to_string(),
                 },
                 tls: RouteTlsConfig::default(),
+                timeout_ms: default_route_timeout_ms(),
                 path: "/".to_string(),
             },
             Route {
@@ -249,6 +282,7 @@ route:
                     port: "8002".to_string(),
                 },
                 tls: RouteTlsConfig::default(),
+                timeout_ms: default_route_timeout_ms(),
                 path: "/h2".to_string(),
             },
         ]);

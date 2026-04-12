@@ -72,6 +72,7 @@ pub fn gateway_response_for_error(
 ) -> Option<Response<entity::GatewayBody>> {
     let status = match error {
         entity::GatewayError::RouteNotFound(_) => hyper::http::StatusCode::NOT_FOUND,
+        entity::GatewayError::Timeout(_) => hyper::http::StatusCode::GATEWAY_TIMEOUT,
         entity::GatewayError::Hyper(_)
         | entity::GatewayError::Io(_)
         | entity::GatewayError::Http(_)
@@ -195,6 +196,7 @@ mod tests {
                 port: "9000".to_string(),
             },
             tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         }
     }
@@ -219,6 +221,7 @@ mod tests {
                 port: "9000".to_string(),
             },
             tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         };
 
@@ -260,6 +263,7 @@ mod tests {
                 port: "9000".to_string(),
             },
             tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         };
 

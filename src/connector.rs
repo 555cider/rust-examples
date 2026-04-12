@@ -70,6 +70,7 @@ mod tests {
                 port: port.to_string(),
             },
             tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
             path: "/".to_string(),
         }
     }

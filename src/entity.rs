@@ -36,6 +36,7 @@ pub enum GatewayError {
     Hyper(hyper::Error),
     Io(std::io::Error),
     Http(hyper::http::Error),
+    Timeout(tokio::time::error::Elapsed),
     RouteNotFound(String),
     InvalidRouteConfig(String),
 }
@@ -46,6 +47,7 @@ impl Display for GatewayError {
             Self::Hyper(err) => write!(f, "hyper error: {}", err),
             Self::Io(err) => write!(f, "io error: {}", err),
             Self::Http(err) => write!(f, "http error: {}", err),
+            Self::Timeout(err) => write!(f, "timeout error: {}", err),
             Self::RouteNotFound(path) => write!(f, "route not found: {}", path),
             Self::InvalidRouteConfig(message) => write!(f, "invalid route config: {}", message),
         }
@@ -58,6 +60,7 @@ impl Error for GatewayError {
             Self::Hyper(err) => Some(err),
             Self::Io(err) => Some(err),
             Self::Http(err) => Some(err),
+            Self::Timeout(err) => Some(err),
             Self::RouteNotFound(_) => None,
             Self::InvalidRouteConfig(_) => None,
         }
@@ -79,6 +82,12 @@ impl From<std::io::Error> for GatewayError {
 impl From<hyper::http::Error> for GatewayError {
     fn from(value: hyper::http::Error) -> Self {
         Self::Http(value)
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for GatewayError {
+    fn from(value: tokio::time::error::Elapsed) -> Self {
+        Self::Timeout(value)
     }
 }
 
