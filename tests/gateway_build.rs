@@ -1307,6 +1307,111 @@ async fn serves_management_health_without_api_key_or_upstream() {
 }
 
 #[tokio::test]
+async fn proxies_scg_style_route_definition() {
+    let upstream = spawn_http1_upstream().await;
+    let config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: products
+          uri: http://localhost:{port}
+          predicates:
+            - Path=/products/**
+            - Method=GET
+"#,
+        port = upstream.addr.port()
+    ))
+    .expect("scg config should parse");
+    let gateway = spawn_gateway_with_routes(config.routes, temp_db_path()).await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/products",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"http1"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn rewrites_scg_style_strip_prefix_before_forwarding() {
+    let upstream = spawn_http1_upstream_echo_path().await;
+    let config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: users
+          uri: http://localhost:{port}
+          predicates:
+            - Path=/api/**
+          filters:
+            - StripPrefix=1
+"#,
+        port = upstream.addr.port()
+    ))
+    .expect("scg config should parse");
+    let gateway = spawn_gateway_with_routes(config.routes, temp_db_path()).await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/api/users?id=7",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"/users?id=7"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn proxies_scg_style_lb_route_definition() {
+    let upstream = spawn_http1_upstream().await;
+    let config = serde_yaml::from_str::<config::GatewayConfig>(&format!(
+        r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: discovered
+          uri: lb://localhost:{port}
+          predicates:
+            - Path=/discovered/**
+"#,
+        port = upstream.addr.port()
+    ))
+    .expect("scg lb config should parse");
+    let gateway = spawn_gateway_with_routes(config.routes, temp_db_path()).await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/discovered",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"http1"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
 async fn serves_management_health_on_dedicated_listener_only() {
     let gateway = spawn_gateway_with_dedicated_management_listener(
         Arc::from([]),

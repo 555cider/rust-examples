@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, io::Read, sync::Arc};
+use std::{collections::BTreeMap, convert::TryFrom, fs::File, io::Read, sync::Arc};
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
+#[serde(try_from = "RawGatewayConfig")]
 pub struct GatewayConfig {
-    #[serde(default)]
     pub server: ServerConfig,
-    #[serde(alias = "route")]
     pub routes: Arc<[Route]>,
 }
 
@@ -78,6 +77,7 @@ pub struct Route {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Authority {
     pub host: String,
+    #[serde(deserialize_with = "deserialize_string_like")]
     pub port: String,
 }
 
@@ -145,6 +145,51 @@ fn default_rate_limit_key_header() -> String {
     "api-key".to_string()
 }
 
+fn deserialize_string_like<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringLikeVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringLikeVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or integer-like scalar")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(StringLikeVisitor)
+}
+
 pub fn load_config(path: &str) -> GatewayConfig {
     let mut contents: String = String::new();
     let mut file: File = File::open(path).expect("Failed to open the configuration file!");
@@ -158,6 +203,577 @@ pub fn get_route<'a>(path: &str, route: &'a [Route]) -> Option<&'a Route> {
         .iter()
         .filter(|candidate| path.starts_with(&candidate.path))
         .max_by_key(|candidate| candidate.path.len())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawGatewayConfig {
+    #[serde(default)]
+    server: ServerConfig,
+    #[serde(default)]
+    routes: Vec<serde_yaml::Value>,
+    #[serde(default)]
+    route: Vec<serde_yaml::Value>,
+    #[serde(default)]
+    spring: RawSpringConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawSpringConfig {
+    #[serde(default)]
+    cloud: RawSpringCloudConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawSpringCloudConfig {
+    #[serde(default)]
+    gateway: RawSpringGatewayConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawSpringGatewayConfig {
+    #[serde(default)]
+    routes: Vec<ScgRouteDefinition>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ScgRouteDefinition {
+    #[serde(default)]
+    id: Option<String>,
+    uri: String,
+    #[serde(default)]
+    predicates: Vec<String>,
+    #[serde(default)]
+    filters: Vec<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Default)]
+struct ScgMetadata {
+    scheme: Option<String>,
+    protocol: Option<Protocol>,
+    port: Option<u16>,
+    timeout_ms: Option<u64>,
+    retry_attempts: Option<usize>,
+    retry_statuses: Option<Arc<[u16]>>,
+    retry_backoff_ms: Option<u64>,
+}
+
+impl TryFrom<RawGatewayConfig> for GatewayConfig {
+    type Error = String;
+
+    fn try_from(raw: RawGatewayConfig) -> Result<Self, Self::Error> {
+        let mut routes = Vec::new();
+
+        for route in raw.route.into_iter().chain(raw.routes) {
+            routes.push(parse_route_definition(route)?);
+        }
+        for route in raw.spring.cloud.gateway.routes {
+            routes.push(convert_scg_route(route)?);
+        }
+
+        Ok(Self {
+            server: raw.server,
+            routes: Arc::from(routes),
+        })
+    }
+}
+
+fn parse_route_definition(value: serde_yaml::Value) -> Result<Route, String> {
+    if let Ok(route) = serde_yaml::from_value::<Route>(value.clone()) {
+        return Ok(route);
+    }
+    if let Ok(route) = serde_yaml::from_value::<ScgRouteDefinition>(value.clone()) {
+        return convert_scg_route(route);
+    }
+
+    let legacy_err = serde_yaml::from_value::<Route>(value.clone())
+        .map(|_| ())
+        .unwrap_err();
+    let scg_err = serde_yaml::from_value::<ScgRouteDefinition>(value)
+        .map(|_| ())
+        .unwrap_err();
+
+    Err(format!(
+        "route definition did not match the legacy or scg-style schema (legacy: {}; scg: {})",
+        legacy_err, scg_err
+    ))
+}
+
+fn convert_scg_route(route: ScgRouteDefinition) -> Result<Route, String> {
+    let metadata = parse_scg_metadata(&route.metadata)?;
+    let (scheme, protocol, authority) = parse_scg_uri(route.id.as_deref(), &route.uri, &metadata)?;
+
+    let mut path = "/".to_string();
+    let mut hosts = Vec::new();
+    let mut methods = Vec::new();
+    let mut headers = BTreeMap::new();
+    let mut queries = BTreeMap::new();
+
+    for predicate in &route.predicates {
+        let (name, args) = split_scg_assignment("predicate", predicate)?;
+        match name.to_ascii_lowercase().as_str() {
+            "path" => {
+                if path != "/" {
+                    return Err(format!(
+                        "multiple scg Path predicates are not supported for route '{}'",
+                        route_name(route.id.as_deref(), &route.uri)
+                    ));
+                }
+                path = parse_scg_path_predicate(args)?;
+            }
+            "host" => {
+                for host in parse_csv(args) {
+                    if host.contains('*') {
+                        return Err(format!(
+                            "unsupported scg predicate 'Host' value '{}' for route '{}'",
+                            host,
+                            route_name(route.id.as_deref(), &route.uri)
+                        ));
+                    }
+                    hosts.push(host.to_string());
+                }
+            }
+            "method" => {
+                methods.extend(parse_csv(args).into_iter().map(str::to_string));
+            }
+            "header" => {
+                let (header_name, header_value) = split_scg_pair("Header", args)?;
+                headers.insert(header_name.to_string(), header_value.to_string());
+            }
+            "query" => {
+                let (query_name, query_value) = split_scg_pair("Query", args)?;
+                queries.insert(query_name.to_string(), query_value.to_string());
+            }
+            other => {
+                return Err(format!(
+                    "unsupported scg predicate '{}' for route '{}'",
+                    other,
+                    route_name(route.id.as_deref(), &route.uri)
+                ));
+            }
+        }
+    }
+
+    let mut rewrite_prefix = None;
+    let mut request_header_remove = Vec::new();
+    let mut request_header_set = BTreeMap::new();
+    let mut response_header_remove = Vec::new();
+    let mut response_header_set = BTreeMap::new();
+
+    for filter in &route.filters {
+        let (name, args) = split_scg_assignment("filter", filter)?;
+        match name.to_ascii_lowercase().as_str() {
+            "stripprefix" => {
+                let segments = args.trim().parse::<usize>().map_err(|err| {
+                    format!(
+                        "invalid scg StripPrefix value '{}' for route '{}': {}",
+                        args,
+                        route_name(route.id.as_deref(), &route.uri),
+                        err
+                    )
+                })?;
+                let rewritten = strip_path_segments(&path, segments)?;
+                rewrite_prefix = Some(rewritten);
+            }
+            "prefixpath" => {
+                let prefix = normalize_prefix_path(args)?;
+                let current = rewrite_prefix.clone().unwrap_or_else(|| path.clone());
+                rewrite_prefix = Some(join_path_prefix(prefix.as_str(), current.as_str()));
+            }
+            "setrequestheader" => {
+                let (header_name, header_value) = split_scg_pair("SetRequestHeader", args)?;
+                request_header_set.insert(header_name.to_string(), header_value.to_string());
+            }
+            "removerequestheader" => {
+                request_header_remove.push(args.trim().to_string());
+            }
+            "setresponseheader" => {
+                let (header_name, header_value) = split_scg_pair("SetResponseHeader", args)?;
+                response_header_set.insert(header_name.to_string(), header_value.to_string());
+            }
+            "removeresponseheader" => {
+                response_header_remove.push(args.trim().to_string());
+            }
+            other => {
+                return Err(format!(
+                    "unsupported scg filter '{}' for route '{}'",
+                    other,
+                    route_name(route.id.as_deref(), &route.uri)
+                ));
+            }
+        }
+    }
+
+    Ok(Route {
+        scheme,
+        protocol,
+        authority,
+        upstreams: Arc::from([]),
+        hosts: Arc::from(hosts),
+        methods: Arc::from(methods),
+        headers,
+        queries,
+        tls: RouteTlsConfig::default(),
+        timeout_ms: metadata.timeout_ms.unwrap_or_else(default_route_timeout_ms),
+        retry_attempts: metadata
+            .retry_attempts
+            .unwrap_or_else(default_route_retry_attempts),
+        retry_statuses: metadata.retry_statuses.unwrap_or_else(|| Arc::from([])),
+        retry_backoff_ms: metadata
+            .retry_backoff_ms
+            .unwrap_or_else(default_route_retry_backoff_ms),
+        circuit_breaker: None,
+        rate_limit: None,
+        rewrite_prefix,
+        request_header_filter: HeaderFilterConfig {
+            set: request_header_set,
+            remove: Arc::from(request_header_remove),
+        },
+        response_header_filter: HeaderFilterConfig {
+            set: response_header_set,
+            remove: Arc::from(response_header_remove),
+        },
+        path,
+    })
+}
+
+fn route_name<'a>(id: Option<&'a str>, uri: &'a str) -> String {
+    id.map(str::to_string)
+        .unwrap_or_else(|| format!("uri={}", uri))
+}
+
+fn split_scg_assignment<'a>(kind: &str, value: &'a str) -> Result<(&'a str, &'a str), String> {
+    value.split_once('=').map_or_else(
+        || Err(format!("invalid scg {} '{}'", kind, value)),
+        |(name, args)| Ok((name.trim(), args.trim())),
+    )
+}
+
+fn split_scg_pair<'a>(kind: &str, value: &'a str) -> Result<(&'a str, &'a str), String> {
+    value.split_once(',').map_or_else(
+        || Err(format!("invalid scg {} '{}'", kind, value)),
+        |(name, val)| Ok((name.trim(), val.trim())),
+    )
+}
+
+fn parse_csv(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn parse_scg_path_predicate(value: &str) -> Result<String, String> {
+    let patterns = parse_csv(value);
+    if patterns.len() != 1 {
+        return Err(format!(
+            "multiple scg Path patterns are not supported: '{}'",
+            value
+        ));
+    }
+
+    let pattern = patterns[0];
+    if !pattern.starts_with('/') {
+        return Err(format!(
+            "scg Path predicate must start with '/': '{}'",
+            pattern
+        ));
+    }
+    if pattern.contains('{') {
+        return Err(format!(
+            "template scg Path predicates are not supported: '{}'",
+            pattern
+        ));
+    }
+
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return Ok(if prefix.is_empty() {
+            "/".to_string()
+        } else {
+            prefix.to_string()
+        });
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return Ok(if prefix.is_empty() {
+            "/".to_string()
+        } else {
+            prefix.to_string()
+        });
+    }
+    if pattern.contains('*') {
+        return Err(format!(
+            "unsupported wildcard scg Path predicate '{}'",
+            pattern
+        ));
+    }
+
+    Ok(pattern.to_string())
+}
+
+fn normalize_prefix_path(value: &str) -> Result<String, String> {
+    let prefix = value.trim();
+    if !prefix.starts_with('/') {
+        return Err(format!("PrefixPath must start with '/': '{}'", prefix));
+    }
+    Ok(prefix.to_string())
+}
+
+fn strip_path_segments(path: &str, segments: usize) -> Result<String, String> {
+    let path_segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments > path_segments.len() {
+        return Err(format!(
+            "StripPrefix={} exceeds route path segment count for '{}'",
+            segments, path
+        ));
+    }
+
+    let remaining = &path_segments[segments..];
+    if remaining.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}", remaining.join("/")))
+    }
+}
+
+fn join_path_prefix(prefix: &str, remainder: &str) -> String {
+    if remainder.is_empty() {
+        return prefix.to_string();
+    }
+
+    match (prefix.ends_with('/'), remainder.starts_with('/')) {
+        (true, true) => format!("{}{}", prefix, &remainder[1..]),
+        (false, false) => format!("{}/{}", prefix, remainder),
+        _ => format!("{}{}", prefix, remainder),
+    }
+}
+
+fn parse_scg_uri(
+    route_id: Option<&str>,
+    uri: &str,
+    metadata: &ScgMetadata,
+) -> Result<(String, Protocol, Authority), String> {
+    let parsed: hyper::Uri = uri.parse().map_err(|err| {
+        format!(
+            "invalid scg uri '{}' for route '{}': {}",
+            uri,
+            route_name(route_id, uri),
+            err
+        )
+    })?;
+    let scheme = parsed
+        .scheme_str()
+        .ok_or_else(|| format!("scg uri '{}' is missing a scheme", uri))?;
+    let authority = parsed
+        .authority()
+        .ok_or_else(|| format!("scg uri '{}' is missing an authority", uri))?;
+
+    let host = authority.host().to_string();
+    let port = authority
+        .port_u16()
+        .or(metadata.port)
+        .or_else(|| default_port_for_scheme(scheme, metadata.scheme.as_deref()))
+        .ok_or_else(|| {
+            format!(
+                "scg uri '{}' for route '{}' is missing a port",
+                uri,
+                route_name(route_id, uri)
+            )
+        })?
+        .to_string();
+
+    match scheme {
+        "http" => Ok((
+            "http".to_string(),
+            metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            Authority { host, port },
+        )),
+        "https" => Ok((
+            "https".to_string(),
+            metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            Authority { host, port },
+        )),
+        "h2c" => Ok(("http".to_string(), Protocol::H2c, Authority { host, port })),
+        "lb" => Ok((
+            metadata
+                .scheme
+                .clone()
+                .unwrap_or_else(|| "http".to_string()),
+            metadata.protocol.clone().unwrap_or(Protocol::Http1),
+            Authority { host, port },
+        )),
+        other => Err(format!(
+            "unsupported scg uri scheme '{}' for route '{}'",
+            other,
+            route_name(route_id, uri)
+        )),
+    }
+}
+
+fn default_port_for_scheme(scheme: &str, metadata_scheme: Option<&str>) -> Option<u16> {
+    match scheme {
+        "http" | "h2c" => Some(80),
+        "https" => Some(443),
+        "lb" => match metadata_scheme.unwrap_or("http") {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_scg_metadata(values: &BTreeMap<String, serde_yaml::Value>) -> Result<ScgMetadata, String> {
+    Ok(ScgMetadata {
+        scheme: metadata_string(values, "scheme")?,
+        protocol: metadata_protocol(values, "protocol")?,
+        port: metadata_u16(values, "port")?,
+        timeout_ms: metadata_u64(values, "timeoutMs")?,
+        retry_attempts: metadata_usize(values, "retryAttempts")?,
+        retry_statuses: metadata_u16_list(values, "retryStatuses")?,
+        retry_backoff_ms: metadata_u64(values, "retryBackoffMs")?,
+    })
+}
+
+fn metadata_string(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match values.get(key) {
+        None => Ok(None),
+        Some(serde_yaml::Value::String(value)) => Ok(Some(value.clone())),
+        Some(value) => Err(format!(
+            "metadata '{}' must be a string, got {}",
+            key,
+            metadata_type(value)
+        )),
+    }
+}
+
+fn metadata_protocol(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<Protocol>, String> {
+    match metadata_string(values, key)? {
+        None => Ok(None),
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "http1" => Ok(Some(Protocol::Http1)),
+            "h2c" => Ok(Some(Protocol::H2c)),
+            "h2" => Ok(Some(Protocol::H2)),
+            _ => Err(format!("unsupported metadata protocol '{}'", value)),
+        },
+    }
+}
+
+fn metadata_u64(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<u64>, String> {
+    match values.get(key) {
+        None => Ok(None),
+        Some(serde_yaml::Value::Number(value)) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("metadata '{}' must be an unsigned integer", key)),
+        Some(serde_yaml::Value::String(value)) => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|err| format!("invalid metadata '{}' value '{}': {}", key, value, err)),
+        Some(value) => Err(format!(
+            "metadata '{}' must be an unsigned integer, got {}",
+            key,
+            metadata_type(value)
+        )),
+    }
+}
+
+fn metadata_usize(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<usize>, String> {
+    metadata_u64(values, key)?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| format!("metadata '{}' value '{}' does not fit in usize", key, value))
+        })
+        .transpose()
+}
+
+fn metadata_u16(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<u16>, String> {
+    metadata_u64(values, key)?
+        .map(|value| {
+            u16::try_from(value)
+                .map_err(|_| format!("metadata '{}' value '{}' does not fit in u16", key, value))
+        })
+        .transpose()
+}
+
+fn metadata_u16_list(
+    values: &BTreeMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Result<Option<Arc<[u16]>>, String> {
+    let Some(value) = values.get(key) else {
+        return Ok(None);
+    };
+
+    let list = match value {
+        serde_yaml::Value::Sequence(sequence) => {
+            let mut result = Vec::with_capacity(sequence.len());
+            for item in sequence {
+                match item {
+                    serde_yaml::Value::Number(number) => {
+                        let value = number.as_u64().ok_or_else(|| {
+                            format!("metadata '{}' entries must be unsigned integers", key)
+                        })?;
+                        result.push(u16::try_from(value).map_err(|_| {
+                            format!("metadata '{}' entry '{}' does not fit in u16", key, value)
+                        })?);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "metadata '{}' entries must be unsigned integers",
+                            key
+                        ));
+                    }
+                }
+            }
+            result
+        }
+        serde_yaml::Value::String(string) => parse_csv(string)
+            .into_iter()
+            .map(|item| {
+                item.parse::<u16>()
+                    .map_err(|err| format!("invalid metadata '{}' entry '{}': {}", key, item, err))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(format!(
+                "metadata '{}' must be a sequence or comma-delimited string",
+                key
+            ));
+        }
+    };
+
+    Ok(Some(Arc::from(list)))
+}
+
+fn metadata_type(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged",
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +872,131 @@ routes:
             config.server.management.listen.as_deref(),
             Some("127.0.0.1:9000")
         );
+    }
+
+    #[test]
+    fn parses_scg_style_routes() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  listen: 127.0.0.1:8080
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: products
+          uri: http://localhost:8001
+          predicates:
+            - Path=/products/**
+            - Host=api.example.com,www.example.com
+            - Method=GET,POST
+            - Header=x-tenant,acme
+            - Query=region,kr
+          filters:
+            - StripPrefix=1
+            - SetRequestHeader=x-added-by-gateway,enabled
+            - RemoveResponseHeader=server
+          metadata:
+            timeoutMs: 250
+            retryAttempts: 2
+            retryStatuses: [503, 504]
+            retryBackoffMs: 25
+"#,
+        )
+        .expect("scg config should parse");
+
+        let route = &config.routes[0];
+        assert_eq!(route.scheme, "http");
+        assert_eq!(route.protocol, Protocol::Http1);
+        assert_eq!(route.authority.host, "localhost");
+        assert_eq!(route.authority.port, "8001");
+        assert_eq!(route.path, "/products");
+        assert_eq!(route.rewrite_prefix.as_deref(), Some("/"));
+        assert_eq!(
+            route.hosts.as_ref(),
+            &["api.example.com", "www.example.com"]
+        );
+        assert_eq!(route.methods.as_ref(), &["GET", "POST"]);
+        assert_eq!(route.headers.get("x-tenant"), Some(&"acme".to_string()));
+        assert_eq!(route.queries.get("region"), Some(&"kr".to_string()));
+        assert_eq!(route.timeout_ms, 250);
+        assert_eq!(route.retry_attempts, 2);
+        assert_eq!(route.retry_statuses.as_ref(), &[503, 504]);
+        assert_eq!(route.retry_backoff_ms, 25);
+        assert_eq!(
+            route.request_header_filter.set.get("x-added-by-gateway"),
+            Some(&"enabled".to_string())
+        );
+        assert_eq!(
+            route.response_header_filter.remove.as_ref(),
+            &["server".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_scg_lb_uri_with_metadata_overrides() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: inventory
+          uri: lb://inventory.internal
+          predicates:
+            - Path=/inventory/**
+          metadata:
+            port: 8443
+            scheme: https
+            protocol: h2
+"#,
+        )
+        .expect("scg lb route should parse");
+
+        let route = &config.routes[0];
+        assert_eq!(route.scheme, "https");
+        assert_eq!(route.protocol, Protocol::H2);
+        assert_eq!(route.authority.host, "inventory.internal");
+        assert_eq!(route.authority.port, "8443");
+        assert_eq!(route.path, "/inventory");
+    }
+
+    #[test]
+    fn rejects_unsupported_scg_predicate() {
+        let err = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - uri: http://localhost:8001
+          predicates:
+            - Cookie=session,abc
+"#,
+        )
+        .expect_err("unsupported predicate should fail");
+
+        assert!(err.to_string().contains("unsupported scg predicate"));
+    }
+
+    #[test]
+    fn rejects_unsupported_scg_filter() {
+        let err = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+spring:
+  cloud:
+    gateway:
+      routes:
+        - uri: http://localhost:8001
+          predicates:
+            - Path=/api/**
+          filters:
+            - AddRequestHeader=x-test,1
+"#,
+        )
+        .expect_err("unsupported filter should fail");
+
+        assert!(err.to_string().contains("unsupported scg filter"));
     }
 
     #[test]

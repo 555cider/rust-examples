@@ -1,6 +1,11 @@
 use crate::{config, entity, tls};
 use rustls::pki_types::ServerName;
-use std::{convert::TryFrom, net::IpAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    convert::TryFrom,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 #[derive(Debug)]
 pub enum UpstreamStream {
@@ -12,14 +17,8 @@ pub async fn connect(
     route: &config::Route,
     authority: &config::Authority,
 ) -> Result<UpstreamStream, entity::GatewayError> {
-    let port = authority.port.parse::<u16>().map_err(|err| {
-        entity::GatewayError::InvalidRouteConfig(format!(
-            "invalid route port '{}': {}",
-            authority.port, err
-        ))
-    })?;
-
-    let stream = tokio::net::TcpStream::connect((authority.host.as_str(), port)).await?;
+    let selected_addr = select_connect_socket_addr(authority).await?;
+    let stream = tokio::net::TcpStream::connect(selected_addr).await?;
 
     if matches!(route.protocol, config::Protocol::H2) && route.scheme != "https" {
         return Err(entity::GatewayError::InvalidRouteConfig(
@@ -37,6 +36,71 @@ pub async fn connect(
             scheme
         ))),
     }
+}
+
+async fn select_connect_socket_addr(
+    authority: &config::Authority,
+) -> Result<SocketAddr, entity::GatewayError> {
+    let resolved = resolve_socket_addrs(authority).await?;
+    select_resolved_address(authority, &resolved).ok_or_else(|| {
+        entity::GatewayError::InvalidRouteConfig(format!(
+            "no socket addresses resolved for authority '{}:{}'",
+            authority.host, authority.port
+        ))
+    })
+}
+
+async fn resolve_socket_addrs(
+    authority: &config::Authority,
+) -> Result<Vec<SocketAddr>, entity::GatewayError> {
+    let port = authority.port.parse::<u16>().map_err(|err| {
+        entity::GatewayError::InvalidRouteConfig(format!(
+            "invalid route port '{}': {}",
+            authority.port, err
+        ))
+    })?;
+
+    if let Ok(ip_addr) = authority.host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip_addr, port)]);
+    }
+
+    let resolved = tokio::net::lookup_host((authority.host.as_str(), port))
+        .await?
+        .collect::<Vec<_>>();
+    if resolved.is_empty() {
+        return Err(entity::GatewayError::InvalidRouteConfig(format!(
+            "no addresses resolved for authority '{}:{}'",
+            authority.host, authority.port
+        )));
+    }
+    Ok(resolved)
+}
+
+fn select_resolved_address(
+    authority: &config::Authority,
+    resolved: &[SocketAddr],
+) -> Option<SocketAddr> {
+    if resolved.is_empty() {
+        return None;
+    }
+
+    let selected = next_resolved_cursor(authority_balance_key(authority)) % resolved.len();
+    resolved.get(selected).copied()
+}
+
+fn authority_balance_key(authority: &config::Authority) -> String {
+    format!("{}:{}", authority.host, authority.port)
+}
+
+fn next_resolved_cursor(authority_key: String) -> usize {
+    static RESOLVERS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+    let resolvers = RESOLVERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut resolvers = resolvers.lock().unwrap();
+    let cursor = resolvers.entry(authority_key).or_insert(0);
+    let selected = *cursor;
+    *cursor = cursor.wrapping_add(1);
+    selected
 }
 
 async fn connect_tls(
@@ -70,6 +134,7 @@ fn tls_server_name(host: &str) -> Result<ServerName<'static>, entity::GatewayErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     fn sample_route(host: &str, port: &str) -> config::Route {
         config::Route {
@@ -132,5 +197,25 @@ mod tests {
             .expect_err("invalid port should fail before connect");
 
         assert!(matches!(err, entity::GatewayError::InvalidRouteConfig(_)));
+    }
+
+    #[test]
+    fn selects_resolved_addresses_round_robin() {
+        let authority = config::Authority {
+            host: format!("round-robin-{}", fastrand::u64(..)),
+            port: "8080".to_string(),
+        };
+        let addresses = vec![
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080)),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 8080)),
+        ];
+
+        let first = select_resolved_address(&authority, &addresses).expect("first address");
+        let second = select_resolved_address(&authority, &addresses).expect("second address");
+        let third = select_resolved_address(&authority, &addresses).expect("third address");
+
+        assert_eq!(first, addresses[0]);
+        assert_eq!(second, addresses[1]);
+        assert_eq!(third, addresses[0]);
     }
 }

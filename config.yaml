@@ -1,22 +1,19 @@
 ---
 server:
   listen: 127.0.0.1:8080
-routes:
-  - scheme: http
-    protocol: http1
-    authority:
-      host: 127.0.0.1
-      port: 8001
-    path: /something
-  - scheme: http
-    protocol: http1
-    authority:
-      host: 127.0.0.1
-      port: 8001
-    path: /product
-  - scheme: http
-    protocol: http1
-    authority:
-      host: 127.0.0.1
-      port: 8001
-    path: /
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: something
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/something/**
+        - id: product
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/product/**
+        - id: fallback
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/**
