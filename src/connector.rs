@@ -85,6 +85,8 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         }

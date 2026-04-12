@@ -90,14 +90,35 @@ pub fn resolve_route(
     path: &str,
     host: Option<&str>,
     method: &Method,
+    headers: &HeaderMap,
+    query: Option<&str>,
     route_config_arr: &[config::Route],
 ) -> Result<config::Route, entity::GatewayError> {
-    route_config_arr
-        .iter()
-        .filter(|candidate| path.starts_with(&candidate.path))
-        .filter(|candidate| route_matches_host(candidate, host))
-        .filter(|candidate| route_matches_method(candidate, method))
-        .max_by_key(|candidate| (candidate.path.len(), route_specificity(candidate)))
+    let mut selected_route: Option<&config::Route> = None;
+
+    for candidate in route_config_arr.iter() {
+        if !path.starts_with(&candidate.path) {
+            continue;
+        }
+        if !route_matches_host(candidate, host)
+            || !route_matches_method(candidate, method)
+            || !route_matches_query(candidate, query)
+        {
+            continue;
+        }
+        if !route_matches_headers(candidate, headers)? {
+            continue;
+        }
+
+        match selected_route {
+            Some(current)
+                if (candidate.path.len(), route_specificity(candidate))
+                    <= (current.path.len(), route_specificity(current)) => {}
+            _ => selected_route = Some(candidate),
+        }
+    }
+
+    selected_route
         .cloned()
         .ok_or_else(|| entity::GatewayError::RouteNotFound(path.to_string()))
 }
@@ -132,6 +153,8 @@ pub async fn route_request(
         incoming_request.uri().path(),
         request_host.as_deref(),
         incoming_request.method(),
+        incoming_request.headers(),
+        incoming_request.uri().query(),
         route_config_arr,
     )?;
     let start_index = select_upstream_start_index(&route_config);
@@ -239,7 +262,10 @@ fn upstream_pool_size(route_config: &config::Route) -> usize {
 }
 
 fn route_specificity(route_config: &config::Route) -> usize {
-    usize::from(!route_config.hosts.is_empty()) + usize::from(!route_config.methods.is_empty())
+    usize::from(!route_config.hosts.is_empty())
+        + usize::from(!route_config.methods.is_empty())
+        + usize::from(!route_config.headers.is_empty())
+        + usize::from(!route_config.queries.is_empty())
 }
 
 fn route_matches_host(route_config: &config::Route, host: Option<&str>) -> bool {
@@ -267,6 +293,66 @@ fn route_matches_method(route_config: &config::Route, method: &Method) -> bool {
         .methods
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(method.as_str()))
+}
+
+fn route_matches_headers(
+    route_config: &config::Route,
+    headers: &HeaderMap,
+) -> Result<bool, entity::GatewayError> {
+    if route_config.headers.is_empty() {
+        return Ok(true);
+    }
+
+    for (name, expected_value) in &route_config.headers {
+        let header_name =
+            hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+                entity::GatewayError::InvalidRouteConfig(format!(
+                    "invalid route header name '{}': {}",
+                    name, err
+                ))
+            })?;
+
+        let Some(actual_value) = headers.get(&header_name) else {
+            return Ok(false);
+        };
+        let Ok(actual_value) = actual_value.to_str() else {
+            return Ok(false);
+        };
+
+        if actual_value != expected_value {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn route_matches_query(route_config: &config::Route, query: Option<&str>) -> bool {
+    if route_config.queries.is_empty() {
+        return true;
+    }
+
+    let Some(query) = query else {
+        return false;
+    };
+    let parsed_query = parse_query_pairs(query);
+
+    route_config
+        .queries
+        .iter()
+        .all(|(expected_key, expected_value)| {
+            parsed_query.iter().any(|(actual_key, actual_value)| {
+                actual_key == expected_key && actual_value == expected_value
+            })
+        })
+}
+
+fn parse_query_pairs(query: &str) -> Vec<(&str, &str)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+        .collect()
 }
 
 fn normalize_host(host: &str) -> String {
@@ -392,6 +478,8 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         }
@@ -422,6 +510,8 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         };
@@ -441,6 +531,8 @@ mod tests {
             upstreams: Arc::from([]),
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
@@ -468,6 +560,8 @@ mod tests {
             upstreams: Arc::from([]),
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
@@ -487,7 +581,8 @@ mod tests {
     fn resolve_route_preserves_protocol() {
         let routes: Arc<[Route]> = Arc::from([sample_route(Protocol::H2c)]);
 
-        let route = resolve_route("/", None, &Method::GET, &routes).expect("route should exist");
+        let route = resolve_route("/", None, &Method::GET, &HeaderMap::new(), None, &routes)
+            .expect("route should exist");
         assert_eq!(route.protocol, Protocol::H2c);
     }
 
@@ -506,6 +601,8 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from(["POST".to_string()]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/api".to_string(),
         }]);
@@ -514,6 +611,8 @@ mod tests {
             "/api/users",
             Some("api.example.com:8443"),
             &Method::POST,
+            &HeaderMap::new(),
+            None,
             &routes,
         )
         .expect("route should match host and method");
@@ -536,14 +635,90 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         }]);
 
-        let err = resolve_route("/", Some("www.example.com"), &Method::GET, &routes)
-            .expect_err("route should not match wrong host");
+        let err = resolve_route(
+            "/",
+            Some("www.example.com"),
+            &Method::GET,
+            &HeaderMap::new(),
+            None,
+            &routes,
+        )
+        .expect_err("route should not match wrong host");
 
         assert!(matches!(err, entity::GatewayError::RouteNotFound(_)));
+    }
+
+    #[test]
+    fn resolve_route_matches_exact_header_predicates() {
+        let routes: Arc<[Route]> = Arc::from([Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: std::collections::BTreeMap::from([(
+                "x-tenant".to_string(),
+                "acme".to_string(),
+            )]),
+            queries: std::collections::BTreeMap::new(),
+            rewrite_prefix: None,
+            path: "/".to_string(),
+        }]);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant", HeaderValue::from_static("acme"));
+
+        let route = resolve_route("/", None, &Method::GET, &headers, None, &routes)
+            .expect("route should match header predicate");
+
+        assert_eq!(route.path, "/");
+    }
+
+    #[test]
+    fn resolve_route_matches_exact_query_predicates() {
+        let routes: Arc<[Route]> = Arc::from([Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::from([("region".to_string(), "kr".to_string())]),
+            rewrite_prefix: None,
+            path: "/search".to_string(),
+        }]);
+
+        let route = resolve_route(
+            "/search",
+            None,
+            &Method::GET,
+            &HeaderMap::new(),
+            Some("region=kr&lang=ko"),
+            &routes,
+        )
+        .expect("route should match query predicate");
+
+        assert_eq!(route.path, "/search");
     }
 
     #[test]
@@ -579,6 +754,8 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: std::collections::BTreeMap::new(),
+            queries: std::collections::BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         };

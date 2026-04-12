@@ -4,6 +4,7 @@ use hyper_gateway::{config, config::Protocol, entity, logger, route, throttle, t
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::{
+    collections::BTreeMap,
     convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
@@ -501,6 +502,16 @@ async fn send_http1_request_with(
     host: &str,
     path: &str,
 ) -> (StatusCode, Bytes) {
+    send_http1_request_with_headers(addr, method, host, path, &[]).await
+}
+
+async fn send_http1_request_with_headers(
+    addr: std::net::SocketAddr,
+    method: hyper::Method,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
@@ -511,13 +522,15 @@ async fn send_http1_request_with(
         conn.await.unwrap();
     });
 
-    let request = Request::builder()
+    let mut request_builder = Request::builder()
         .uri(format!("http://{host}{path}"))
         .method(method)
         .header("host", host)
-        .header("api-key", "1")
-        .body(Empty::new())
-        .unwrap();
+        .header("api-key", "1");
+    for (name, value) in extra_headers {
+        request_builder = request_builder.header(*name, *value);
+    }
+    let request = request_builder.body(Empty::new()).unwrap();
     let response = sender.send_request(request).await.unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -720,6 +733,8 @@ async fn supports_http1_gateway_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -755,6 +770,8 @@ async fn round_robins_across_configured_http1_upstreams() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -801,6 +818,8 @@ async fn retries_failed_primary_connection_on_next_upstream() {
             retry_attempts: 1,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -837,6 +856,8 @@ async fn retries_upstream_timeout_on_next_backend() {
             retry_attempts: 1,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -870,6 +891,8 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: Some("/".to_string()),
             path: "/api".to_string(),
         },
@@ -910,6 +933,8 @@ async fn selects_host_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/".to_string(),
             },
@@ -926,6 +951,8 @@ async fn selects_host_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from(["api.example.com".to_string()]),
                 methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/".to_string(),
             },
@@ -964,6 +991,8 @@ async fn selects_method_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/submit".to_string(),
             },
@@ -980,6 +1009,8 @@ async fn selects_method_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from(["POST".to_string()]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/submit".to_string(),
             },
@@ -1004,6 +1035,133 @@ async fn selects_method_specific_route() {
 }
 
 #[tokio::test]
+async fn selects_header_specific_route() {
+    let default_upstream =
+        spawn_http1_upstream_with_body_for_connections(b"default-header", 1).await;
+    let header_upstream = spawn_http1_upstream_with_body_for_connections(b"header-match", 1).await;
+    let gateway = spawn_gateway_with_routes(
+        Arc::from([
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: default_upstream.addr.ip().to_string(),
+                    port: default_upstream.addr.port().to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
+                retry_attempts: 0,
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
+                rewrite_prefix: None,
+                path: "/tenant".to_string(),
+            },
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: header_upstream.addr.ip().to_string(),
+                    port: header_upstream.addr.port().to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
+                retry_attempts: 0,
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
+                headers: BTreeMap::from([("x-tenant".to_string(), "acme".to_string())]),
+                queries: BTreeMap::new(),
+                rewrite_prefix: None,
+                path: "/tenant".to_string(),
+            },
+        ]),
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request_with_headers(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/tenant",
+        &[("x-tenant", "acme")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"header-match"));
+    gateway.finish().await;
+    drop(default_upstream);
+    header_upstream.finish().await;
+}
+
+#[tokio::test]
+async fn selects_query_specific_route() {
+    let default_upstream =
+        spawn_http1_upstream_with_body_for_connections(b"default-query", 1).await;
+    let query_upstream = spawn_http1_upstream_with_body_for_connections(b"query-match", 1).await;
+    let gateway = spawn_gateway_with_routes(
+        Arc::from([
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: default_upstream.addr.ip().to_string(),
+                    port: default_upstream.addr.port().to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
+                retry_attempts: 0,
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
+                rewrite_prefix: None,
+                path: "/search".to_string(),
+            },
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: query_upstream.addr.ip().to_string(),
+                    port: query_upstream.addr.port().to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
+                retry_attempts: 0,
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::from([("region".to_string(), "kr".to_string())]),
+                rewrite_prefix: None,
+                path: "/search".to_string(),
+            },
+        ]),
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/search?region=kr",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"query-match"));
+    gateway.finish().await;
+    drop(default_upstream);
+    query_upstream.finish().await;
+}
+
+#[tokio::test]
 async fn supports_https_client_to_http1_upstream() {
     let tls_fixture = create_localhost_tls_fixture();
     let upstream = spawn_http1_upstream().await;
@@ -1021,6 +1179,8 @@ async fn supports_https_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1056,6 +1216,8 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1088,6 +1250,8 @@ async fn supports_https_h2_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1120,6 +1284,8 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1151,6 +1317,8 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1185,6 +1353,8 @@ async fn supports_http1_gateway_to_https_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1221,6 +1391,8 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1251,6 +1423,8 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1282,6 +1456,8 @@ async fn supports_h2c_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1313,6 +1489,8 @@ async fn supports_http1_client_to_h2c_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },
@@ -1346,6 +1524,8 @@ async fn supports_multi_route_protocol_selection() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/".to_string(),
             },
@@ -1362,6 +1542,8 @@ async fn supports_multi_route_protocol_selection() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/h2".to_string(),
             },
@@ -1440,6 +1622,8 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
             rewrite_prefix: None,
             path: "/".to_string(),
         },

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io::Read, sync::Arc};
+use std::{collections::BTreeMap, fs::File, io::Read, sync::Arc};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -45,6 +45,10 @@ pub struct Route {
     pub hosts: Arc<[String]>,
     #[serde(default)]
     pub methods: Arc<[String]>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub queries: BTreeMap<String, String>,
     #[serde(default)]
     pub tls: RouteTlsConfig,
     #[serde(default = "default_route_timeout_ms")]
@@ -313,6 +317,35 @@ routes:
     }
 
     #[test]
+    fn parses_route_headers_and_queries() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    headers:
+      x-tenant: acme
+    queries:
+      region: kr
+    path: /search
+"#,
+        )
+        .expect("header/query config should parse");
+
+        assert_eq!(
+            config.routes[0].headers.get("x-tenant"),
+            Some(&"acme".to_string())
+        );
+        assert_eq!(
+            config.routes[0].queries.get("region"),
+            Some(&"kr".to_string())
+        );
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -383,6 +416,8 @@ route:
                 retry_attempts: default_route_retry_attempts(),
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: std::collections::BTreeMap::new(),
+                queries: std::collections::BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/".to_string(),
             },
@@ -399,6 +434,8 @@ route:
                 retry_attempts: default_route_retry_attempts(),
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                headers: std::collections::BTreeMap::new(),
+                queries: std::collections::BTreeMap::new(),
                 rewrite_prefix: None,
                 path: "/h2".to_string(),
             },
