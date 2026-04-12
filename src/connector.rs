@@ -83,6 +83,8 @@ mod tests {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
             path: "/".to_string(),
         }
     }

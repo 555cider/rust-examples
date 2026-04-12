@@ -7,7 +7,7 @@ use crate::{config, entity, throttle, trace, upstream};
 use http_body_util::BodyExt;
 use hyper::{
     body::{Bytes, Incoming},
-    header::HeaderValue,
+    header::{HeaderValue, HOST},
     service::service_fn,
     HeaderMap, Method, Request, Response, Version,
 };
@@ -88,9 +88,16 @@ pub fn gateway_response_for_error(
 
 pub fn resolve_route(
     path: &str,
+    host: Option<&str>,
+    method: &Method,
     route_config_arr: &[config::Route],
 ) -> Result<config::Route, entity::GatewayError> {
-    config::get_route(path, route_config_arr)
+    route_config_arr
+        .iter()
+        .filter(|candidate| path.starts_with(&candidate.path))
+        .filter(|candidate| route_matches_host(candidate, host))
+        .filter(|candidate| route_matches_method(candidate, method))
+        .max_by_key(|candidate| (candidate.path.len(), route_specificity(candidate)))
         .cloned()
         .ok_or_else(|| entity::GatewayError::RouteNotFound(path.to_string()))
 }
@@ -121,7 +128,13 @@ pub async fn route_request(
     incoming_request: Request<Incoming>,
     route_config_arr: &[config::Route],
 ) -> Result<upstream::RoutedRequest, entity::GatewayError> {
-    let route_config = resolve_route(incoming_request.uri().path(), route_config_arr)?;
+    let request_host = request_host(incoming_request.headers(), incoming_request.uri());
+    let route_config = resolve_route(
+        incoming_request.uri().path(),
+        request_host.as_deref(),
+        incoming_request.method(),
+        route_config_arr,
+    )?;
     let start_index = select_upstream_start_index(&route_config);
     let request = prepare_request(incoming_request).await?;
 
@@ -134,6 +147,17 @@ pub async fn route_request(
         path_and_query: request.path_and_query,
         body: request.body,
     })
+}
+
+pub fn request_host(headers: &HeaderMap, uri: &hyper::Uri) -> Option<String> {
+    headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            uri.authority()
+                .map(|authority| authority.as_str().to_string())
+        })
 }
 
 pub async fn prepare_request(
@@ -217,6 +241,54 @@ fn upstream_pool_size(route_config: &config::Route) -> usize {
     route_config.upstreams.len() + 1
 }
 
+fn route_specificity(route_config: &config::Route) -> usize {
+    usize::from(!route_config.hosts.is_empty()) + usize::from(!route_config.methods.is_empty())
+}
+
+fn route_matches_host(route_config: &config::Route, host: Option<&str>) -> bool {
+    if route_config.hosts.is_empty() {
+        return true;
+    }
+
+    let Some(host) = host else {
+        return false;
+    };
+    let request_host = normalize_host(host);
+
+    route_config
+        .hosts
+        .iter()
+        .any(|candidate| normalize_host(candidate) == request_host)
+}
+
+fn route_matches_method(route_config: &config::Route, method: &Method) -> bool {
+    if route_config.methods.is_empty() {
+        return true;
+    }
+
+    route_config
+        .methods
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(method.as_str()))
+}
+
+fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((ipv6, _)) = rest.split_once(']') {
+            return ipv6.to_ascii_lowercase();
+        }
+    }
+
+    match host.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            host.to_ascii_lowercase()
+        }
+        _ => host.to_ascii_lowercase(),
+    }
+}
+
 fn route_balance_key(route_config: &config::Route) -> String {
     let mut key = format!(
         "{}|{:?}|{}|{}|{}",
@@ -274,6 +346,8 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
             path: "/".to_string(),
         }
     }
@@ -301,6 +375,8 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
             path: "/".to_string(),
         };
 
@@ -311,8 +387,61 @@ mod tests {
     fn resolve_route_preserves_protocol() {
         let routes: Arc<[Route]> = Arc::from([sample_route(Protocol::H2c)]);
 
-        let route = resolve_route("/", &routes).expect("route should exist");
+        let route = resolve_route("/", None, &Method::GET, &routes).expect("route should exist");
         assert_eq!(route.protocol, Protocol::H2c);
+    }
+
+    #[test]
+    fn resolve_route_matches_host_and_method_predicates() {
+        let routes: Arc<[Route]> = Arc::from([Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from(["api.example.com".to_string()]),
+            methods: Arc::from(["POST".to_string()]),
+            path: "/api".to_string(),
+        }]);
+
+        let route = resolve_route(
+            "/api/users",
+            Some("api.example.com:8443"),
+            &Method::POST,
+            &routes,
+        )
+        .expect("route should match host and method");
+
+        assert_eq!(route.path, "/api");
+    }
+
+    #[test]
+    fn resolve_route_rejects_non_matching_host_predicate() {
+        let routes: Arc<[Route]> = Arc::from([Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from(["api.example.com".to_string()]),
+            methods: Arc::from([]),
+            path: "/".to_string(),
+        }]);
+
+        let err = resolve_route("/", Some("www.example.com"), &Method::GET, &routes)
+            .expect_err("route should not match wrong host");
+
+        assert!(matches!(err, entity::GatewayError::RouteNotFound(_)));
     }
 
     #[test]
@@ -346,6 +475,8 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
             path: "/".to_string(),
         };
 

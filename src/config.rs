@@ -42,6 +42,10 @@ pub struct Route {
     #[serde(default)]
     pub upstreams: Arc<[Authority]>,
     #[serde(default)]
+    pub hosts: Arc<[String]>,
+    #[serde(default)]
+    pub methods: Arc<[String]>,
+    #[serde(default)]
     pub tls: RouteTlsConfig,
     #[serde(default = "default_route_timeout_ms")]
     pub timeout_ms: u64,
@@ -262,6 +266,29 @@ routes:
     }
 
     #[test]
+    fn parses_route_hosts_and_methods() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    hosts: [api.example.com]
+    methods: [GET, POST]
+    path: /api
+"#,
+        )
+        .expect("predicate config should parse");
+
+        assert_eq!(config.routes[0].hosts.len(), 1);
+        assert_eq!(config.routes[0].hosts[0], "api.example.com");
+        assert_eq!(config.routes[0].methods.len(), 2);
+        assert_eq!(config.routes[0].methods[1], "POST");
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -330,6 +357,8 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
                 path: "/".to_string(),
             },
             Route {
@@ -343,6 +372,8 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                hosts: Arc::from([]),
+                methods: Arc::from([]),
                 path: "/h2".to_string(),
             },
         ]);
