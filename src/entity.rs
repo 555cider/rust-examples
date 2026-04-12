@@ -9,6 +9,7 @@ use std::{
 pub enum GatewayBody {
     Empty,
     Incoming(hyper::body::Incoming),
+    Bytes(Option<hyper::body::Bytes>),
 }
 
 impl hyper::body::Body for GatewayBody {
@@ -26,6 +27,10 @@ impl hyper::body::Body for GatewayBody {
                 Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(GatewayError::from(err)))),
                 Poll::Ready(None) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
+            },
+            Self::Bytes(body) => match body.take() {
+                Some(bytes) => Poll::Ready(Some(Ok(hyper::body::Frame::data(bytes)))),
+                None => Poll::Ready(None),
             },
         }
     }
@@ -99,6 +104,19 @@ pub fn get_gateway_response(status_code: hyper::http::StatusCode) -> hyper::Resp
         .status(status_code)
         .body(GatewayBody::Empty)
         .expect("Failed to build gateway response");
+    log::info!("response = {:?}", response);
+    response
+}
+
+pub fn get_gateway_json_response(
+    status_code: hyper::http::StatusCode,
+    body: hyper::body::Bytes,
+) -> hyper::Response<GatewayBody> {
+    let response = hyper::Response::builder()
+        .status(status_code)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(GatewayBody::Bytes(Some(body)))
+        .expect("Failed to build gateway JSON response");
     log::info!("response = {:?}", response);
     response
 }

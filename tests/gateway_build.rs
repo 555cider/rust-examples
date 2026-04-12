@@ -655,6 +655,37 @@ async fn send_http1_request_full(
     (status, headers, body)
 }
 
+async fn send_http1_request_without_api_key(
+    addr: std::net::SocketAddr,
+    method: hyper::Method,
+    host: &str,
+    path: &str,
+) -> (StatusCode, hyper::HeaderMap, Bytes) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let request = Request::builder()
+        .uri(format!("http://{host}{path}"))
+        .method(method)
+        .header("host", host)
+        .body(Empty::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    drop(sender);
+    conn_task.await.unwrap();
+    (status, headers, body)
+}
+
 async fn send_http1_requests_on_connection(
     addr: std::net::SocketAddr,
     request_count: usize,
@@ -866,6 +897,107 @@ async fn supports_http1_gateway_to_http1_upstream() {
     assert_eq!(body, Bytes::from_static(b"http1"));
     gateway.finish().await;
     upstream.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_health_without_api_key_or_upstream() {
+    let gateway = spawn_gateway_with_routes(Arc::from([]), temp_db_path()).await;
+
+    let (status, headers, body) = send_http1_request_without_api_key(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/health",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert_eq!(body, Bytes::from_static(br#"{"status":"UP"}"#));
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_routes_without_api_key() {
+    let gateway = spawn_gateway_with_routes(
+        Arc::from([
+            config::Route {
+                scheme: "http".to_string(),
+                protocol: config::Protocol::Http1,
+                authority: config::Authority {
+                    host: "127.0.0.1".to_string(),
+                    port: "8001".to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 30_000,
+                retry_attempts: 0,
+                circuit_breaker: None,
+                hosts: Arc::from([]),
+                methods: Arc::from(["GET".to_string()]),
+                headers: BTreeMap::new(),
+                queries: BTreeMap::new(),
+                rewrite_prefix: None,
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
+                path: "/api".to_string(),
+            },
+            config::Route {
+                scheme: "https".to_string(),
+                protocol: config::Protocol::H2,
+                authority: config::Authority {
+                    host: "example.com".to_string(),
+                    port: "443".to_string(),
+                },
+                upstreams: Arc::from([]),
+                tls: config::RouteTlsConfig::default(),
+                timeout_ms: 5_000,
+                retry_attempts: 1,
+                circuit_breaker: Some(config::CircuitBreakerConfig {
+                    failure_threshold: 2,
+                    open_ms: 250,
+                }),
+                hosts: Arc::from(["api.example.com".to_string()]),
+                methods: Arc::from([]),
+                headers: BTreeMap::from([("x-tenant".to_string(), "acme".to_string())]),
+                queries: BTreeMap::new(),
+                rewrite_prefix: Some("/internal".to_string()),
+                request_header_filter: config::HeaderFilterConfig::default(),
+                response_header_filter: config::HeaderFilterConfig::default(),
+                path: "/admin".to_string(),
+            },
+        ]),
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, headers, body) = send_http1_request_without_api_key(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/routes",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    let body = String::from_utf8(body.to_vec()).expect("utf8 json body");
+    assert!(body.contains(r#""routes":["#));
+    assert!(body.contains(r#""path":"/api""#));
+    assert!(body.contains(r#""path":"/admin""#));
+    assert!(body.contains(r#""protocol":"h2""#));
+    assert!(body.contains(r#""failure_threshold":2"#));
+    gateway.finish().await;
 }
 
 #[tokio::test]

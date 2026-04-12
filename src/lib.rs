@@ -2,6 +2,7 @@ pub mod config;
 pub mod connector;
 pub mod entity;
 pub mod logger;
+pub mod management;
 pub mod route;
 pub mod throttle;
 pub mod tls;

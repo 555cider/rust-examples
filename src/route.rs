@@ -38,6 +38,11 @@ where
         let throttle_pool = throttle_pool_clone.clone();
 
         async move {
+            if let Some(response) = crate::management::handle(&incoming_request, &route_config_arr)?
+            {
+                return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
+            }
+
             let throttle_status = throttle::run(
                 &throttle_pool.lock().unwrap().get().unwrap(),
                 incoming_request.headers(),
