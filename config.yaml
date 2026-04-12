@@ -1,18 +1,43 @@
 ---
+# The gateway currently loads ./config.yaml from the process working directory.
+# More complete examples live in docs/configuration-examples.md.
 server:
   listen: 127.0.0.1:8080
+  # tls:
+  #   cert_path: /absolute/path/to/gateway-cert.pem
+  #   key_path: /absolute/path/to/gateway-key.pem
+  # management:
+  #   listen: 127.0.0.1:9000
+  #   auth_token: change-me
+  # discovery:
+  #   refresh_ms: 5000
+  #   consul:
+  #     address: http://127.0.0.1:8500
+  #     token: your-consul-token
+  #     passing_only: true
+  #
+  #   eureka:
+  #     service_url: http://127.0.0.1:8761/eureka/v2/apps
+  #     username: admin
+  #     password: secret
+  #     prefer_ip_address: true
+
 spring:
   cloud:
     gateway:
       routes:
-        - id: something
+        - id: users
           uri: http://127.0.0.1:8001
           predicates:
-            - Path=/something/**
-        - id: product
-          uri: http://127.0.0.1:8001
+            - Path=/users/**
+
+        - id: products
+          uri: http://127.0.0.1:8002
           predicates:
-            - Path=/product/**
+            - Path=/products/**
+          filters:
+            - StripPrefix=1
+
         - id: fallback
           uri: http://127.0.0.1:8001
           predicates:

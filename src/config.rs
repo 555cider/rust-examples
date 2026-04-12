@@ -877,6 +877,19 @@ routes:
     }
 
     #[test]
+    fn parses_repository_config_yaml_example() {
+        let contents =
+            std::fs::read_to_string("config.yaml").expect("repository config.yaml should exist");
+        let config =
+            serde_yaml::from_str::<GatewayConfig>(&contents).expect("config.yaml should parse");
+
+        assert!(
+            !config.routes.is_empty(),
+            "config.yaml should define routes"
+        );
+    }
+
+    #[test]
     fn parses_server_tls_config() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"

@@ -498,6 +498,51 @@ async fn spawn_http1_upstream_echo_filter_headers() -> SpawnedUpstream {
     }
 }
 
+async fn spawn_http1_upstream_echo_content_type_and_body(
+    connection_count: usize,
+) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        for _ in 0..connection_count {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service =
+                hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                    let content_type = request
+                        .headers()
+                        .get(hyper::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let mut echoed = content_type.as_bytes().to_vec();
+                    echoed.push(b'\n');
+                    echoed.extend_from_slice(&body);
+
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Full::new(Bytes::from(echoed)))
+                            .unwrap(),
+                    )
+                });
+
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .ok();
+        }
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn spawn_http1_upstream_with_response_headers() -> SpawnedUpstream {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -940,6 +985,42 @@ async fn send_http1_request_full(
     drop(sender);
     conn_task.await.unwrap();
     (status, headers, body)
+}
+
+async fn send_http1_request_with_body(
+    addr: std::net::SocketAddr,
+    method: hyper::Method,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+    body: Bytes,
+) -> (StatusCode, Bytes) {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let mut request_builder = Request::builder()
+        .uri(format!("http://{host}{path}"))
+        .method(method)
+        .header("host", host)
+        .header("api-key", "1");
+    for (name, value) in extra_headers {
+        request_builder = request_builder.header(*name, *value);
+    }
+    let request = request_builder.body(Full::new(body)).unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    drop(sender);
+    conn_task.abort();
+    let _ = conn_task.await;
+    (status, body)
 }
 
 async fn send_http1_request_without_api_key(
@@ -2561,6 +2642,77 @@ async fn applies_response_header_filter_before_returning_to_client() {
     assert_eq!(headers.get("x-gateway").expect("gateway header"), "enabled");
     assert!(!headers.contains_key("x-upstream-remove"));
     assert_eq!(headers.get("x-upstream-keep").expect("keep header"), "ok");
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn proxies_common_request_bodies_without_content_type_rewrite() {
+    let upstream = spawn_http1_upstream_echo_content_type_and_body(3).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            discovery: None,
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/submit".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let cases = [
+        (
+            "application/json",
+            r#"{"name":"alice","role":"admin"}"#,
+        ),
+        (
+            "application/x-www-form-urlencoded",
+            "name=alice&role=admin",
+        ),
+        (
+            "multipart/form-data; boundary=boundary123",
+            "--boundary123\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nalice\r\n--boundary123\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--boundary123--\r\n",
+        ),
+    ];
+
+    for (content_type, body) in cases {
+        let (status, echoed) = send_http1_request_with_body(
+            gateway.addr,
+            hyper::Method::POST,
+            "gateway.local",
+            "/submit",
+            &[("content-type", content_type)],
+            Bytes::from(body.to_string()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            echoed,
+            Bytes::from(format!("{content_type}\n{body}")),
+            "gateway should forward request body and content-type unchanged"
+        );
+    }
+
     gateway.finish().await;
     upstream.finish().await;
 }
