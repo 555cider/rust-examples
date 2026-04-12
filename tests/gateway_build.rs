@@ -289,6 +289,39 @@ async fn spawn_http1_upstream_with_body_for_connections(
     }
 }
 
+async fn spawn_http1_upstream_with_status_sequence(statuses: Vec<StatusCode>) -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        for status in statuses {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = hyper::service::service_fn(
+                move |_request: Request<hyper::body::Incoming>| async move {
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(status)
+                            .body(Full::new(Bytes::from(status.as_str().as_bytes().to_vec())))
+                            .unwrap(),
+                    )
+                },
+            );
+
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .ok();
+        }
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn spawn_http1_upstream_echo_path() -> SpawnedUpstream {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -981,6 +1014,8 @@ async fn supports_http1_gateway_to_http1_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1040,6 +1075,8 @@ async fn serves_management_routes_without_api_key() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from(["GET".to_string()]),
@@ -1061,6 +1098,8 @@ async fn serves_management_routes_without_api_key() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 5_000,
                 retry_attempts: 1,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: Some(config::CircuitBreakerConfig {
                     failure_threshold: 2,
                     open_ms: 250,
@@ -1118,6 +1157,8 @@ async fn serves_management_metrics_snapshot_for_management_and_proxy_requests() 
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1221,6 +1262,8 @@ async fn serves_management_metrics_snapshot_with_gateway_errors() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1358,6 +1401,8 @@ async fn round_robins_across_configured_http1_upstreams() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1409,6 +1454,8 @@ async fn retries_failed_primary_connection_on_next_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1432,6 +1479,50 @@ async fn retries_failed_primary_connection_on_next_upstream() {
 }
 
 #[tokio::test]
+async fn retries_retryable_upstream_status_on_next_backend() {
+    let primary = spawn_http1_upstream_with_status_sequence(vec![StatusCode::SERVICE_UNAVAILABLE]).await;
+    let backup = spawn_http1_upstream_with_body_for_connections(b"retryable-status-backup", 1).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: primary.addr.ip().to_string(),
+                port: primary.addr.port().to_string(),
+            },
+            upstreams: Arc::from([config::Authority {
+                host: backup.addr.ip().to_string(),
+                port: backup.addr.port().to_string(),
+            }]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            retry_statuses: Arc::from([StatusCode::SERVICE_UNAVAILABLE.as_u16()]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"retryable-status-backup"));
+
+    gateway.finish().await;
+    primary.finish().await;
+    backup.finish().await;
+}
+
+#[tokio::test]
 async fn retries_upstream_timeout_on_next_backend() {
     let slow = spawn_slow_http1_upstream(100).await;
     let backup = spawn_http1_upstream_with_body_for_connections(b"timeout-backup", 1).await;
@@ -1450,6 +1541,8 @@ async fn retries_upstream_timeout_on_next_backend() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 10,
             retry_attempts: 1,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1488,6 +1581,8 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1531,6 +1626,8 @@ async fn applies_request_header_filter_before_forwarding_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1581,6 +1678,8 @@ async fn applies_response_header_filter_before_returning_to_client() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1627,6 +1726,8 @@ async fn selects_host_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1648,6 +1749,8 @@ async fn selects_host_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from(["api.example.com".to_string()]),
                 methods: Arc::from([]),
@@ -1691,6 +1794,8 @@ async fn selects_method_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1712,6 +1817,8 @@ async fn selects_method_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from(["POST".to_string()]),
@@ -1760,6 +1867,8 @@ async fn selects_header_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1781,6 +1890,8 @@ async fn selects_header_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1830,6 +1941,8 @@ async fn selects_query_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1851,6 +1964,8 @@ async fn selects_query_specific_route() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -1897,6 +2012,8 @@ async fn supports_https_client_to_http1_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1937,6 +2054,8 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             },
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -1974,6 +2093,8 @@ async fn supports_https_h2_client_to_http1_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2011,6 +2132,8 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 10,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2047,6 +2170,8 @@ async fn opens_circuit_breaker_after_transport_failure_and_recovers_after_cooldo
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: Some(config::CircuitBreakerConfig {
                 failure_threshold: 1,
                 open_ms: 250,
@@ -2157,6 +2282,8 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2196,6 +2323,8 @@ async fn supports_http1_gateway_to_https_upstream() {
             },
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2237,6 +2366,8 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2272,6 +2403,8 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2308,6 +2441,8 @@ async fn supports_h2c_client_to_http1_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2344,6 +2479,8 @@ async fn supports_http1_client_to_h2c_upstream() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
@@ -2382,6 +2519,8 @@ async fn supports_multi_route_protocol_selection() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -2403,6 +2542,8 @@ async fn supports_multi_route_protocol_selection() {
                 tls: config::RouteTlsConfig::default(),
                 timeout_ms: 30_000,
                 retry_attempts: 0,
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -2486,6 +2627,8 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             tls: config::RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
             circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),

@@ -39,6 +39,18 @@ pub async fn send(
         let request = build_attempt_request(&routed, authority)?;
 
         match send_attempt(&routed.route, authority, request).await {
+            Ok(response)
+                if should_retry_status(response.status(), &routed.route) && attempt + 1 < max_attempts =>
+            {
+                log::warn!(
+                    "Upstream attempt {}/{} returned retryable status {} for route '{}'",
+                    attempt + 1,
+                    max_attempts,
+                    response.status(),
+                    routed.route.path
+                );
+                wait_before_retry(&routed.route).await;
+            }
             Ok(response) => {
                 reset_circuit_breaker(&routed.route);
                 return Ok(response);
@@ -52,6 +64,7 @@ pub async fn send(
                     err
                 );
                 last_error = Some(err);
+                wait_before_retry(&routed.route).await;
             }
             Err(err) => {
                 record_circuit_breaker_failure(&routed.route, circuit_breaker, &err);
@@ -132,6 +145,16 @@ fn should_retry(error: &entity::GatewayError) -> bool {
             | entity::GatewayError::Io(_)
             | entity::GatewayError::Timeout(_)
     )
+}
+
+fn should_retry_status(status: hyper::StatusCode, route: &config::Route) -> bool {
+    route.retry_statuses.iter().any(|code| *code == status.as_u16())
+}
+
+async fn wait_before_retry(route: &config::Route) {
+    if route.retry_backoff_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(route.retry_backoff_ms)).await;
+    }
 }
 
 fn should_trip_circuit_breaker(error: &entity::GatewayError) -> bool {

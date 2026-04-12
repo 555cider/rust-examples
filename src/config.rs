@@ -59,6 +59,10 @@ pub struct Route {
     #[serde(default = "default_route_retry_attempts")]
     pub retry_attempts: usize,
     #[serde(default)]
+    pub retry_statuses: Arc<[u16]>,
+    #[serde(default = "default_route_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+    #[serde(default)]
     pub circuit_breaker: Option<CircuitBreakerConfig>,
     #[serde(default)]
     pub rewrite_prefix: Option<String>,
@@ -118,6 +122,10 @@ fn default_route_timeout_ms() -> u64 {
 }
 
 fn default_route_retry_attempts() -> usize {
+    0
+}
+
+fn default_route_retry_backoff_ms() -> u64 {
     0
 }
 
@@ -325,6 +333,28 @@ routes:
     }
 
     #[test]
+    fn parses_retry_statuses_and_backoff() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    retry_attempts: 2
+    retry_statuses: [503, 504]
+    retry_backoff_ms: 25
+    path: /retry
+"#,
+        )
+        .expect("retry policy config should parse");
+
+        assert_eq!(config.routes[0].retry_statuses.as_ref(), &[503, 504]);
+        assert_eq!(config.routes[0].retry_backoff_ms, 25);
+    }
+
+    #[test]
     fn parses_route_hosts_and_methods() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -526,6 +556,8 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
@@ -547,6 +579,8 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                retry_statuses: Arc::from([]),
+                retry_backoff_ms: 0,
                 circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
