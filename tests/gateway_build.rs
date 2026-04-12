@@ -1017,6 +1017,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1033,6 +1034,158 @@ async fn supports_http1_gateway_to_http1_upstream() {
     let (status, body) = send_http1_request(gateway.addr).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"http1"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn allows_unlimited_route_without_api_key() {
+    let upstream = spawn_http1_upstream().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, _, body) =
+        send_http1_request_without_api_key(gateway.addr, hyper::Method::GET, "gateway.local", "/")
+            .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"http1"));
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn rejects_rate_limited_route_without_key_header() {
+    let upstream = spawn_http1_upstream().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: Some(config::RateLimitConfig {
+                requests: 1,
+                window_ms: 1_000,
+                key_header: "api-key".to_string(),
+            }),
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, _, body) =
+        send_http1_request_without_api_key(gateway.addr, hyper::Method::GET, "gateway.local", "/")
+            .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.is_empty());
+
+    gateway.finish().await;
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn returns_too_many_requests_when_route_rate_limit_is_exceeded() {
+    let upstream = spawn_http1_upstream_with_body_for_connections(b"rate-limited", 1).await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: Some(config::RateLimitConfig {
+                requests: 1,
+                window_ms: 1_000,
+                key_header: "api-key".to_string(),
+            }),
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let responses = send_http1_request_sequence(
+        gateway.addr,
+        &[
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/",
+                include_api_key: true,
+            },
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/",
+                include_api_key: true,
+            },
+        ],
+    )
+    .await;
+
+    assert_eq!(responses[0].0, StatusCode::OK);
+    assert_eq!(responses[0].2, Bytes::from_static(b"rate-limited"));
+    assert_eq!(responses[1].0, StatusCode::TOO_MANY_REQUESTS);
+    assert!(responses[1].2.is_empty());
+
     gateway.finish().await;
     upstream.finish().await;
 }
@@ -1078,6 +1231,7 @@ async fn serves_management_routes_without_api_key() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from(["GET".to_string()]),
                 headers: BTreeMap::new(),
@@ -1104,6 +1258,7 @@ async fn serves_management_routes_without_api_key() {
                     failure_threshold: 2,
                     open_ms: 250,
                 }),
+                rate_limit: None,
                 hosts: Arc::from(["api.example.com".to_string()]),
                 methods: Arc::from([]),
                 headers: BTreeMap::from([("x-tenant".to_string(), "acme".to_string())]),
@@ -1160,6 +1315,7 @@ async fn serves_management_metrics_snapshot_for_management_and_proxy_requests() 
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1265,6 +1421,7 @@ async fn serves_management_metrics_snapshot_with_gateway_errors() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1404,6 +1561,7 @@ async fn round_robins_across_configured_http1_upstreams() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1457,6 +1615,7 @@ async fn retries_failed_primary_connection_on_next_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1500,6 +1659,7 @@ async fn retries_retryable_upstream_status_on_next_backend() {
             retry_statuses: Arc::from([StatusCode::SERVICE_UNAVAILABLE.as_u16()]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1544,6 +1704,7 @@ async fn retries_upstream_timeout_on_next_backend() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1584,6 +1745,7 @@ async fn rewrites_request_prefix_before_forwarding_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1629,6 +1791,7 @@ async fn applies_request_header_filter_before_forwarding_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1681,6 +1844,7 @@ async fn applies_response_header_filter_before_returning_to_client() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -1729,6 +1893,7 @@ async fn selects_host_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -1752,6 +1917,7 @@ async fn selects_host_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from(["api.example.com".to_string()]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -1797,6 +1963,7 @@ async fn selects_method_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -1820,6 +1987,7 @@ async fn selects_method_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from(["POST".to_string()]),
                 headers: BTreeMap::new(),
@@ -1870,6 +2038,7 @@ async fn selects_header_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -1893,6 +2062,7 @@ async fn selects_header_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::from([("x-tenant".to_string(), "acme".to_string())]),
@@ -1944,6 +2114,7 @@ async fn selects_query_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -1967,6 +2138,7 @@ async fn selects_query_specific_route() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -2015,6 +2187,7 @@ async fn supports_https_client_to_http1_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2057,6 +2230,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2096,6 +2270,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2135,6 +2310,7 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2176,6 +2352,7 @@ async fn opens_circuit_breaker_after_transport_failure_and_recovers_after_cooldo
                 failure_threshold: 1,
                 open_ms: 250,
             }),
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2285,6 +2462,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2326,6 +2504,7 @@ async fn supports_http1_gateway_to_https_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2369,6 +2548,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2406,6 +2586,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2444,6 +2625,7 @@ async fn supports_h2c_client_to_http1_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2482,6 +2664,7 @@ async fn supports_http1_client_to_h2c_upstream() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),
@@ -2522,6 +2705,7 @@ async fn supports_multi_route_protocol_selection() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -2545,6 +2729,7 @@ async fn supports_multi_route_protocol_selection() {
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: BTreeMap::new(),
@@ -2630,6 +2815,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: BTreeMap::new(),

@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
-    time::Instant,
-};
+use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::Instant};
 
 use crate::{config, entity, metrics, throttle, trace, upstream};
 use http_body_util::BodyExt;
@@ -21,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub async fn run(
     gateway_stream: tokio::net::TcpStream,
     route_config_arr_clone: Arc<[config::Route]>,
-    throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
+    throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
 ) -> Result<(), entity::GatewayError> {
@@ -38,7 +34,7 @@ pub async fn run(
 pub async fn serve_connection<T>(
     gateway_stream: T,
     route_config_arr_clone: Arc<[config::Route]>,
-    throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
+    throttle_pool_clone: throttle::ThrottlePool,
     metrics_collector: metrics::MetricsCollector,
     management_config: config::ManagementConfig,
 ) -> Result<(), entity::GatewayError>
@@ -74,29 +70,27 @@ where
                 return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
             }
 
-            let throttle_status = throttle::run(
-                &throttle_pool.lock().unwrap().get().unwrap(),
-                incoming_request.headers(),
-            )
-            .unwrap();
+            let response = match match_route_request(&incoming_request, &route_config_arr) {
+                Ok(matched_route) => {
+                    let throttle_status =
+                        throttle::run(&throttle_pool, &matched_route.route, incoming_request.headers())?;
 
-            if !throttle_status.is_success() {
-                metrics::record(
-                    &metrics_collector,
-                    "__throttle",
-                    throttle_status,
-                    request_started_at.elapsed(),
-                    None,
-                );
-                return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(
-                    entity::get_gateway_response(throttle_status),
-                );
-            }
+                    if !throttle_status.is_success() {
+                        metrics::record(
+                            &metrics_collector,
+                            "__throttle",
+                            throttle_status,
+                            request_started_at.elapsed(),
+                            None,
+                        );
+                        return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(
+                            entity::get_gateway_response(throttle_status),
+                        );
+                    }
 
-            let response = match route_request(incoming_request, &route_config_arr).await {
-                Ok(routed) => {
-                    let route_path = routed.route.path.clone();
-                    match upstream::send(routed).await {
+                    let route_path = matched_route.route.path.clone();
+                    match prepare_routed_request(incoming_request, matched_route).await {
+                        Ok(routed) => match upstream::send(routed).await {
                         Ok(response) => {
                             metrics::record(
                                 &metrics_collector,
@@ -107,6 +101,8 @@ where
                             );
                             Ok(response)
                         }
+                        Err(err) => Err((route_path, err)),
+                    },
                         Err(err) => Err((route_path, err)),
                     }
                 }
@@ -136,6 +132,27 @@ where
         .serve_connection(TokioIo::new(gateway_stream), service)
         .await
         .map_err(|err| entity::GatewayError::Io(std::io::Error::other(err)))
+}
+
+pub fn match_route_request(
+    incoming_request: &Request<Incoming>,
+    route_config_arr: &[config::Route],
+) -> Result<MatchedRoute, entity::GatewayError> {
+    let request_host = request_host(incoming_request.headers(), incoming_request.uri());
+    let route_config = resolve_route(
+        incoming_request.uri().path(),
+        request_host.as_deref(),
+        incoming_request.method(),
+        incoming_request.headers(),
+        incoming_request.uri().query(),
+        route_config_arr,
+    )?;
+    let start_index = select_upstream_start_index(&route_config);
+
+    Ok(MatchedRoute {
+        route: route_config,
+        start_index,
+    })
 }
 
 fn metrics_route_label_for_error(error: &entity::GatewayError) -> &'static str {
@@ -223,27 +240,8 @@ pub async fn route_request(
     incoming_request: Request<Incoming>,
     route_config_arr: &[config::Route],
 ) -> Result<upstream::RoutedRequest, entity::GatewayError> {
-    let request_host = request_host(incoming_request.headers(), incoming_request.uri());
-    let route_config = resolve_route(
-        incoming_request.uri().path(),
-        request_host.as_deref(),
-        incoming_request.method(),
-        incoming_request.headers(),
-        incoming_request.uri().query(),
-        route_config_arr,
-    )?;
-    let start_index = select_upstream_start_index(&route_config);
-    let request = prepare_request(incoming_request, &route_config).await?;
-
-    Ok(upstream::RoutedRequest {
-        route: route_config,
-        start_index,
-        method: request.method,
-        version: request.version,
-        headers: request.headers,
-        path_and_query: request.path_and_query,
-        body: request.body,
-    })
+    let matched_route = match_route_request(&incoming_request, route_config_arr)?;
+    prepare_routed_request(incoming_request, matched_route).await
 }
 
 pub fn request_host(headers: &HeaderMap, uri: &hyper::Uri) -> Option<String> {
@@ -569,6 +567,28 @@ pub struct PreparedRequest {
     pub body: Bytes,
 }
 
+pub struct MatchedRoute {
+    pub route: config::Route,
+    pub start_index: usize,
+}
+
+pub async fn prepare_routed_request(
+    incoming_request: Request<Incoming>,
+    matched_route: MatchedRoute,
+) -> Result<upstream::RoutedRequest, entity::GatewayError> {
+    let request = prepare_request(incoming_request, &matched_route.route).await?;
+
+    Ok(upstream::RoutedRequest {
+        route: matched_route.route,
+        start_index: matched_route.start_index,
+        method: request.method,
+        version: request.version,
+        headers: request.headers,
+        path_and_query: request.path_and_query,
+        body: request.body,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,6 +610,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -627,6 +648,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -660,6 +682,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             rewrite_prefix: Some("/".to_string()),
             request_header_filter: HeaderFilterConfig::default(),
             response_header_filter: HeaderFilterConfig::default(),
@@ -694,6 +717,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             rewrite_prefix: Some("/".to_string()),
             request_header_filter: HeaderFilterConfig::default(),
             response_header_filter: HeaderFilterConfig::default(),
@@ -733,6 +757,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from(["POST".to_string()]),
             headers: std::collections::BTreeMap::new(),
@@ -772,6 +797,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -811,6 +837,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::from([(
@@ -849,6 +876,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -937,6 +965,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),

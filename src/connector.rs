@@ -86,6 +86,7 @@ mod tests {
             retry_statuses: Arc::from([]),
             retry_backoff_ms: 0,
             circuit_breaker: None,
+            rate_limit: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),

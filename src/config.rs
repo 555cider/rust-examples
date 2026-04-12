@@ -65,6 +65,8 @@ pub struct Route {
     #[serde(default)]
     pub circuit_breaker: Option<CircuitBreakerConfig>,
     #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default)]
     pub rewrite_prefix: Option<String>,
     #[serde(default)]
     pub request_header_filter: HeaderFilterConfig,
@@ -91,6 +93,14 @@ pub struct HeaderFilterConfig {
 pub struct CircuitBreakerConfig {
     pub failure_threshold: usize,
     pub open_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    pub requests: u64,
+    pub window_ms: u64,
+    #[serde(default = "default_rate_limit_key_header")]
+    pub key_header: String,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -127,6 +137,10 @@ fn default_route_retry_attempts() -> usize {
 
 fn default_route_retry_backoff_ms() -> u64 {
     0
+}
+
+fn default_rate_limit_key_header() -> String {
+    "api-key".to_string()
 }
 
 pub fn load_config(path: &str) -> GatewayConfig {
@@ -355,6 +369,31 @@ routes:
     }
 
     #[test]
+    fn parses_route_rate_limit() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    rate_limit:
+      requests: 2
+      window_ms: 1000
+      key_header: x-api-key
+    path: /api
+"#,
+        )
+        .expect("rate limit config should parse");
+
+        let rate_limit = config.routes[0].rate_limit.as_ref().expect("rate limit");
+        assert_eq!(rate_limit.requests, 2);
+        assert_eq!(rate_limit.window_ms, 1000);
+        assert_eq!(rate_limit.key_header, "x-api-key");
+    }
+
+    #[test]
     fn parses_route_hosts_and_methods() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -559,6 +598,7 @@ route:
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: std::collections::BTreeMap::new(),
@@ -582,6 +622,7 @@ route:
                 retry_statuses: Arc::from([]),
                 retry_backoff_ms: 0,
                 circuit_breaker: None,
+                rate_limit: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: std::collections::BTreeMap::new(),

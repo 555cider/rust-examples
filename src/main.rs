@@ -1,5 +1,5 @@
 use hyper_gateway::{config, logger, metrics, route, throttle, tls};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -12,7 +12,7 @@ async fn main() {
     let management_config = gateway_config.server.management.clone();
     let route_config_arr: Arc<[config::Route]> = gateway_config.routes;
 
-    let throttle_pool: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
+    let throttle_pool: throttle::ThrottlePool =
         throttle::init_throttle().expect("Failed to initialize the throttle!");
     let metrics_collector = metrics::new_collector();
 
