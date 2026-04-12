@@ -11,12 +11,24 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder as AutoBuilder,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub async fn run(
     gateway_stream: tokio::net::TcpStream,
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
 ) -> Result<(), entity::GatewayError> {
+    serve_connection(gateway_stream, route_config_arr_clone, throttle_pool_clone).await
+}
+
+pub async fn serve_connection<T>(
+    gateway_stream: T,
+    route_config_arr_clone: Arc<[config::Route]>,
+    throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
+) -> Result<(), entity::GatewayError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let service = service_fn(move |incoming_request: Request<Incoming>| {
         let route_config_arr = route_config_arr_clone.clone();
         let throttle_pool = throttle_pool_clone.clone();

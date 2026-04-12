@@ -1,5 +1,5 @@
-use crate::{config, entity};
-use rustls::pki_types::{CertificateDer, ServerName};
+use crate::{config, entity, tls};
+use rustls::pki_types::ServerName;
 use std::{convert::TryFrom, net::IpAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -56,53 +56,7 @@ fn tls_server_name(host: &str) -> Result<ServerName<'static>, entity::GatewayErr
 }
 
 fn tls_root_store(route: &config::Route) -> Result<rustls::RootCertStore, entity::GatewayError> {
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    if let Some(path) = route.tls.ca_cert_path.as_deref() {
-        for cert in load_certificates(path)? {
-            root_store.add(cert).map_err(|err| {
-                entity::GatewayError::InvalidRouteConfig(format!(
-                    "failed to add route tls certificate '{}': {}",
-                    path, err
-                ))
-            })?;
-        }
-    }
-
-    Ok(root_store)
-}
-
-fn load_certificates(path: &str) -> Result<Vec<CertificateDer<'static>>, entity::GatewayError> {
-    let bytes = std::fs::read(path).map_err(|err| {
-        entity::GatewayError::InvalidRouteConfig(format!(
-            "failed to read route tls certificate '{}': {}",
-            path, err
-        ))
-    })?;
-
-    if bytes.starts_with(b"-----BEGIN") {
-        let mut reader = std::io::BufReader::new(bytes.as_slice());
-        let certs = rustls_pemfile::certs(&mut reader)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| {
-                entity::GatewayError::InvalidRouteConfig(format!(
-                    "failed to parse PEM certificate '{}': {}",
-                    path, err
-                ))
-            })?;
-
-        if certs.is_empty() {
-            return Err(entity::GatewayError::InvalidRouteConfig(format!(
-                "route tls certificate '{}' did not contain any certificates",
-                path
-            )));
-        }
-
-        Ok(certs)
-    } else {
-        Ok(vec![CertificateDer::from(bytes)])
-    }
+    tls::build_client_root_store(route.tls.ca_cert_path.as_deref())
 }
 
 #[cfg(test)]

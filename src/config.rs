@@ -13,12 +13,15 @@ pub struct GatewayConfig {
 pub struct ServerConfig {
     #[serde(default = "default_listen_addr")]
     pub listen: String,
+    #[serde(default)]
+    pub tls: Option<ServerTlsConfig>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: default_listen_addr(),
+            tls: None,
         }
     }
 }
@@ -50,6 +53,14 @@ pub struct Authority {
 pub struct RouteTlsConfig {
     #[serde(default)]
     pub ca_cert_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct ServerTlsConfig {
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    #[serde(default)]
+    pub key_path: Option<String>,
 }
 
 fn default_listen_addr() -> String {
@@ -94,6 +105,31 @@ routes:
 
         assert_eq!(config.server.listen, "127.0.0.1:9090");
         assert_eq!(config.routes[0].authority.host, "localhost");
+    }
+
+    #[test]
+    fn parses_server_tls_config() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  listen: 127.0.0.1:9443
+  tls:
+    cert_path: /tmp/gateway-cert.der
+    key_path: /tmp/gateway-key.der
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("tls config should parse");
+
+        let tls = config.server.tls.expect("server tls");
+        assert_eq!(tls.cert_path.as_deref(), Some("/tmp/gateway-cert.der"));
+        assert_eq!(tls.key_path.as_deref(), Some("/tmp/gateway-key.der"));
     }
 
     #[test]

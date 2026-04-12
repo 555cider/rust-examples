@@ -4,5 +4,6 @@ pub mod entity;
 pub mod logger;
 pub mod route;
 pub mod throttle;
+pub mod tls;
 pub mod trace;
 pub mod upstream;

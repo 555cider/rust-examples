@@ -2,8 +2,9 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::{body::Bytes, Request, Response, StatusCode};
 use hyper_gateway::{config, config::Protocol, entity, logger, route, throttle, trace};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::{
+    convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -120,6 +121,7 @@ struct SpawnedUpstream {
 
 struct TlsFixture {
     cert_path: PathBuf,
+    key_path: PathBuf,
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
 }
@@ -157,6 +159,7 @@ impl Drop for SpawnedUpstream {
 impl Drop for TlsFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.cert_path);
+        let _ = std::fs::remove_file(&self.key_path);
     }
 }
 
@@ -281,11 +284,16 @@ fn create_localhost_tls_fixture() -> TlsFixture {
         .expect("localhost certificate");
     let cert_der = certified.cert.der().to_vec();
     let key_der = certified.key_pair.serialize_der();
-    let cert_path = std::env::temp_dir().join(format!("gateway-test-cert-{}.der", fastrand::u64(..)));
+    let cert_path =
+        std::env::temp_dir().join(format!("gateway-test-cert-{}.der", fastrand::u64(..)));
+    let key_path =
+        std::env::temp_dir().join(format!("gateway-test-key-{}.der", fastrand::u64(..)));
     std::fs::write(&cert_path, &cert_der).expect("write test cert");
+    std::fs::write(&key_path, &key_der).expect("write test key");
 
     TlsFixture {
         cert_path,
+        key_path,
         cert_der,
         key_der,
     }
@@ -384,6 +392,81 @@ async fn send_h2c_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
     (status, body)
 }
 
+async fn send_https_http1_request(
+    addr: std::net::SocketAddr,
+    tls_fixture: &TlsFixture,
+) -> (StatusCode, Bytes) {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(CertificateDer::from(tls_fixture.cert_der.clone()))
+        .expect("add gateway cert");
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let tls_stream = connector
+        .connect(
+            ServerName::try_from("localhost".to_string()).expect("localhost server name"),
+            stream,
+        )
+        .await
+        .unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Empty<Bytes>>(TokioIo::new(tls_stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let request = Request::builder()
+        .uri("https://gateway.local/")
+        .header("api-key", "1")
+        .body(Empty::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    drop(sender);
+    conn_task.await.unwrap();
+    (status, body)
+}
+
+async fn spawn_tls_gateway_once(
+    route_config: config::Route,
+    db_path: PathBuf,
+    tls_fixture: &TlsFixture,
+) -> SpawnedGateway {
+    let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_tls = config::ServerTlsConfig {
+        cert_path: Some(tls_fixture.cert_path.display().to_string()),
+        key_path: Some(tls_fixture.key_path.display().to_string()),
+    };
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
+        hyper_gateway::tls::build_server_config(&server_tls).expect("server tls config"),
+    ));
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = tls_acceptor.accept(stream).await.unwrap();
+        route::serve_connection(stream, Arc::from([route_config]), throttle_pool)
+            .await
+            .unwrap();
+    });
+
+    SpawnedGateway {
+        addr,
+        task: Some(task),
+        db_guard: TempDbGuard::new(db_path),
+    }
+}
+
 #[tokio::test]
 async fn supports_http1_gateway_to_http1_upstream() {
     let upstream = spawn_http1_upstream().await;
@@ -403,6 +486,33 @@ async fn supports_http1_gateway_to_http1_upstream() {
     .await;
 
     let (status, body) = send_http1_request(gateway.addr).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"http1"));
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn supports_https_client_to_http1_upstream() {
+    let tls_fixture = create_localhost_tls_fixture();
+    let upstream = spawn_http1_upstream().await;
+    let gateway = spawn_tls_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            tls: config::RouteTlsConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+        &tls_fixture,
+    )
+    .await;
+
+    let (status, body) = send_https_http1_request(gateway.addr, &tls_fixture).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, Bytes::from_static(b"http1"));
     gateway.finish().await;
