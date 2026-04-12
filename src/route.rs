@@ -7,7 +7,7 @@ use std::{
 use crate::{config, discovery, entity, metrics, throttle, trace, upstream};
 use http_body_util::BodyExt;
 use hyper::{
-    body::{Bytes, Incoming},
+    body::Incoming,
     header::{HeaderValue, HOST},
     service::service_fn,
     HeaderMap, Method, Request, Response, Version,
@@ -348,11 +348,15 @@ pub async fn prepare_request(
 ) -> Result<PreparedRequest, entity::GatewayError> {
     let traceparent = extract_traceparent(request.headers());
     let (parts, body) = request.into_parts();
-    let body = body.collect().await?.to_bytes();
     let mut headers = parts.headers;
     apply_header_filter(&mut headers, &route_config.request_header_filter)?;
     headers.insert("traceparent", traceparent.as_headervalue());
     let path_and_query = rewrite_path_and_query(&parts.uri, route_config)?;
+    let body = if route_config.retry_attempts > 0 {
+        upstream::RequestBody::Buffered(body.collect().await?.to_bytes())
+    } else {
+        upstream::RequestBody::Streaming(body)
+    };
 
     Ok(PreparedRequest {
         method: parts.method,
@@ -651,7 +655,7 @@ pub struct PreparedRequest {
     pub version: Version,
     pub headers: HeaderMap,
     pub path_and_query: String,
-    pub body: Bytes,
+    pub body: upstream::RequestBody,
 }
 
 pub struct MatchedRoute {
@@ -672,7 +676,7 @@ pub async fn prepare_routed_request(
         version: request.version,
         headers: request.headers,
         path_and_query: request.path_and_query,
-        body: request.body,
+        body: Some(request.body),
     })
 }
 

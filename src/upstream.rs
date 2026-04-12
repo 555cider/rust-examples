@@ -1,5 +1,4 @@
 use crate::{config, connector, discovery, entity, route};
-use http_body_util::Full;
 use hyper::{body::Bytes, header::HOST, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::{
@@ -16,7 +15,12 @@ pub struct RoutedRequest {
     pub version: hyper::Version,
     pub headers: hyper::HeaderMap,
     pub path_and_query: String,
-    pub body: Bytes,
+    pub body: Option<RequestBody>,
+}
+
+pub enum RequestBody {
+    Buffered(Bytes),
+    Streaming(hyper::body::Incoming),
 }
 
 #[derive(Default)]
@@ -26,18 +30,38 @@ struct CircuitBreakerState {
 }
 
 pub async fn send(
-    routed: RoutedRequest,
+    mut routed: RoutedRequest,
     discovery_registry: discovery::DiscoveryRegistry,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let circuit_breaker = validate_circuit_breaker_config(&routed.route)?;
-    enforce_circuit_breaker(&routed.route, circuit_breaker)?;
+    enforce_circuit_breaker(&routed.route, circuit_breaker.as_ref())?;
 
+    let body = routed
+        .body
+        .take()
+        .expect("routed request body should exist");
+    match body {
+        RequestBody::Buffered(body) => {
+            send_buffered(routed, body, discovery_registry, circuit_breaker).await
+        }
+        RequestBody::Streaming(body) => {
+            send_streaming(routed, body, discovery_registry, circuit_breaker).await
+        }
+    }
+}
+
+async fn send_buffered(
+    routed: RoutedRequest,
+    body: Bytes,
+    discovery_registry: discovery::DiscoveryRegistry,
+    circuit_breaker: Option<config::CircuitBreakerConfig>,
+) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let max_attempts = routed.route.retry_attempts + 1;
     let mut last_error = None;
 
     for attempt in 0..max_attempts {
         let authority = route::authority_for_attempt(&routed.route, routed.start_index, attempt);
-        let request = build_attempt_request(&routed, authority)?;
+        let request = build_buffered_attempt_request(&routed, authority, body.clone())?;
 
         match send_attempt(&routed.route, authority, request, &discovery_registry).await {
             Ok(response)
@@ -69,21 +93,42 @@ pub async fn send(
                 wait_before_retry(&routed.route).await;
             }
             Err(err) => {
-                record_circuit_breaker_failure(&routed.route, circuit_breaker, &err);
+                record_circuit_breaker_failure(&routed.route, circuit_breaker.as_ref(), &err);
                 return Err(err);
             }
         }
     }
 
     let err = last_error.expect("retry loop should preserve the last retryable error");
-    record_circuit_breaker_failure(&routed.route, circuit_breaker, &err);
+    record_circuit_breaker_failure(&routed.route, circuit_breaker.as_ref(), &err);
     Err(err)
 }
 
-fn build_attempt_request(
+async fn send_streaming(
+    routed: RoutedRequest,
+    body: hyper::body::Incoming,
+    discovery_registry: discovery::DiscoveryRegistry,
+    circuit_breaker: Option<config::CircuitBreakerConfig>,
+) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
+    let authority = route::authority_for_attempt(&routed.route, routed.start_index, 0);
+    let request = build_streaming_attempt_request(&routed, authority, body)?;
+
+    match send_attempt(&routed.route, authority, request, &discovery_registry).await {
+        Ok(response) => {
+            reset_circuit_breaker(&routed.route);
+            Ok(response)
+        }
+        Err(err) => {
+            record_circuit_breaker_failure(&routed.route, circuit_breaker.as_ref(), &err);
+            Err(err)
+        }
+    }
+}
+
+fn request_builder(
     routed: &RoutedRequest,
     authority: &config::Authority,
-) -> Result<Request<Full<Bytes>>, entity::GatewayError> {
+) -> Result<hyper::http::request::Builder, entity::GatewayError> {
     let uri = format!(
         "{}://{}{}",
         routed.route.scheme,
@@ -97,15 +142,33 @@ fn build_attempt_request(
     let headers = request_builder.headers_mut().unwrap();
     *headers = routed.headers.clone();
     headers.insert(HOST, route::upstream_host_header(authority)?);
-    request_builder
-        .body(Full::new(routed.body.clone()))
+    Ok(request_builder)
+}
+
+fn build_buffered_attempt_request(
+    routed: &RoutedRequest,
+    authority: &config::Authority,
+    body: Bytes,
+) -> Result<Request<entity::GatewayBody>, entity::GatewayError> {
+    request_builder(routed, authority)?
+        .body(entity::GatewayBody::Bytes(Some(body)))
+        .map_err(entity::GatewayError::from)
+}
+
+fn build_streaming_attempt_request(
+    routed: &RoutedRequest,
+    authority: &config::Authority,
+    body: hyper::body::Incoming,
+) -> Result<Request<entity::GatewayBody>, entity::GatewayError> {
+    request_builder(routed, authority)?
+        .body(entity::GatewayBody::Incoming(body))
         .map_err(entity::GatewayError::from)
 }
 
 async fn send_attempt(
     route: &config::Route,
     authority: &config::Authority,
-    request: Request<Full<Bytes>>,
+    request: Request<entity::GatewayBody>,
     discovery_registry: &discovery::DiscoveryRegistry,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
     let protocol = route.protocol.clone();
@@ -169,7 +232,7 @@ fn should_trip_circuit_breaker(error: &entity::GatewayError) -> bool {
 
 fn validate_circuit_breaker_config(
     route: &config::Route,
-) -> Result<Option<&config::CircuitBreakerConfig>, entity::GatewayError> {
+) -> Result<Option<config::CircuitBreakerConfig>, entity::GatewayError> {
     let Some(circuit_breaker) = route.circuit_breaker.as_ref() else {
         return Ok(None);
     };
@@ -188,7 +251,7 @@ fn validate_circuit_breaker_config(
         )));
     }
 
-    Ok(Some(circuit_breaker))
+    Ok(Some(circuit_breaker.clone()))
 }
 
 fn enforce_circuit_breaker(
@@ -255,7 +318,7 @@ fn circuit_breaker_states() -> &'static Mutex<HashMap<String, CircuitBreakerStat
 async fn send_on_io<T>(
     route_io: TokioIo<T>,
     protocol: config::Protocol,
-    request: Request<Full<Bytes>>,
+    request: Request<entity::GatewayBody>,
     response_header_filter: &config::HeaderFilterConfig,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError>
 where
@@ -264,7 +327,7 @@ where
     match protocol {
         config::Protocol::Http1 => {
             let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
-                .handshake::<_, Full<Bytes>>(route_io)
+                .handshake::<_, entity::GatewayBody>(route_io)
                 .await?;
 
             tokio::spawn(async move {
@@ -283,7 +346,7 @@ where
         }
         config::Protocol::H2c | config::Protocol::H2 => {
             let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-                .handshake::<_, Full<Bytes>>(route_io)
+                .handshake::<_, entity::GatewayBody>(route_io)
                 .await?;
 
             tokio::spawn(async move {

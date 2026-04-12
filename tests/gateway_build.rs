@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 fn temp_db_path() -> PathBuf {
@@ -541,6 +542,60 @@ async fn spawn_http1_upstream_echo_content_type_and_body(
         addr,
         task: Some(task),
     }
+}
+
+async fn spawn_http1_upstream_signal_first_body_chunk(
+) -> (SpawnedUpstream, tokio::sync::oneshot::Receiver<Bytes>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (chunk_tx, chunk_rx) = tokio::sync::oneshot::channel();
+    let chunk_tx = Arc::new(std::sync::Mutex::new(Some(chunk_tx)));
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+            let chunk_tx = chunk_tx.clone();
+            async move {
+                let mut body = request.into_body();
+                let first_chunk = match body.frame().await {
+                    Some(Ok(frame)) => frame
+                        .data_ref()
+                        .map(|data| data.clone())
+                        .unwrap_or_else(Bytes::new),
+                    Some(Err(err)) => return Err::<Response<Full<Bytes>>, _>(err),
+                    None => Bytes::new(),
+                };
+
+                if let Some(sender) = chunk_tx.lock().unwrap().take() {
+                    let _ = sender.send(first_chunk.clone());
+                }
+
+                let _ = body.collect().await?;
+
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from_static(b"streamed")))
+                        .unwrap(),
+                )
+            }
+        });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .ok();
+    });
+
+    (
+        SpawnedUpstream {
+            addr,
+            task: Some(task),
+        },
+        chunk_rx,
+    )
 }
 
 async fn spawn_http1_upstream_with_response_headers() -> SpawnedUpstream {
@@ -2712,6 +2767,90 @@ async fn proxies_common_request_bodies_without_content_type_rewrite() {
             "gateway should forward request body and content-type unchanged"
         );
     }
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn streams_request_body_to_upstream_when_retries_are_disabled() {
+    let (upstream, first_chunk_rx) = spawn_http1_upstream_signal_first_body_chunk().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            discovery: None,
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_statuses: Arc::from([]),
+            retry_backoff_ms: 0,
+            circuit_breaker: None,
+            rate_limit: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/upload".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let mut client = tokio::net::TcpStream::connect(gateway.addr)
+        .await
+        .expect("connect gateway");
+    client
+        .write_all(
+            concat!(
+                "POST /upload HTTP/1.1\r\n",
+                "Host: gateway.local\r\n",
+                "api-key: 1\r\n",
+                "Content-Type: application/octet-stream\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write request headers");
+    client
+        .write_all(b"5\r\nhello\r\n")
+        .await
+        .expect("write first body chunk");
+    client.flush().await.expect("flush first chunk");
+
+    let first_chunk = tokio::time::timeout(std::time::Duration::from_millis(200), first_chunk_rx)
+        .await
+        .expect("gateway should stream the first chunk before the request completes")
+        .expect("upstream should receive a first chunk");
+    assert_eq!(first_chunk, Bytes::from_static(b"hello"));
+
+    client
+        .write_all(b"6\r\n world\r\n0\r\n\r\n")
+        .await
+        .expect("write remaining body");
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        client.read_to_end(&mut response),
+    )
+    .await
+    .expect("gateway should return a response")
+    .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("streamed"));
 
     gateway.finish().await;
     upstream.finish().await;
