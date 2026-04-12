@@ -1,12 +1,21 @@
 use std::future::{Future, pending};
 
+use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{config::Config, db, error::Result, http::router};
+use crate::{config::Config, db, error::Result, http, state::AppState};
 
 pub fn build_router() -> axum::Router {
-    router::build_router().layer(TraceLayer::new_for_http())
+    http::router::build_router().layer(TraceLayer::new_for_http())
+}
+
+pub fn build_application_router(db_pool: PgPool, secure_cookies: bool) -> axum::Router {
+    let state = AppState::new(db_pool, secure_cookies);
+
+    http::router::build_router()
+        .merge(http::auth::build_router().with_state(state))
+        .layer(TraceLayer::new_for_http())
 }
 
 pub async fn run() -> Result<()> {
@@ -20,14 +29,17 @@ where
 {
     init_tracing();
 
-    let _db_pool = db::connect(&config.database_url, config.database_max_connections).await?;
-    db::migrate(&_db_pool).await?;
+    let db_pool = db::connect(&config.database_url, config.database_max_connections).await?;
+    db::migrate(&db_pool).await?;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!("auth server listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, build_router())
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        build_application_router(db_pool, !config.bind_addr.ip().is_loopback()),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
 
     Ok(())
 }
