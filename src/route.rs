@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 
-use crate::{config, entity, throttle, trace, upstream};
+use crate::{config, entity, metrics, throttle, trace, upstream};
 use http_body_util::BodyExt;
 use hyper::{
     body::{Bytes, Incoming},
@@ -21,14 +22,22 @@ pub async fn run(
     gateway_stream: tokio::net::TcpStream,
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
+    metrics_collector: metrics::MetricsCollector,
 ) -> Result<(), entity::GatewayError> {
-    serve_connection(gateway_stream, route_config_arr_clone, throttle_pool_clone).await
+    serve_connection(
+        gateway_stream,
+        route_config_arr_clone,
+        throttle_pool_clone,
+        metrics_collector,
+    )
+    .await
 }
 
 pub async fn serve_connection<T>(
     gateway_stream: T,
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
+    metrics_collector: metrics::MetricsCollector,
 ) -> Result<(), entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -36,10 +45,24 @@ where
     let service = service_fn(move |incoming_request: Request<Incoming>| {
         let route_config_arr = route_config_arr_clone.clone();
         let throttle_pool = throttle_pool_clone.clone();
+        let metrics_collector = metrics_collector.clone();
 
         async move {
-            if let Some(response) = crate::management::handle(&incoming_request, &route_config_arr)?
+            let request_path = incoming_request.uri().path().to_string();
+            let request_started_at = Instant::now();
+
+            if let Some(response) =
+                crate::management::handle(&incoming_request, &route_config_arr, &metrics_collector)?
             {
+                if !crate::management::is_metrics_path(&request_path) {
+                    metrics::record(
+                        &metrics_collector,
+                        &request_path,
+                        response.status(),
+                        request_started_at.elapsed(),
+                        None,
+                    );
+                }
                 return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(response);
             }
 
@@ -50,20 +73,51 @@ where
             .unwrap();
 
             if !throttle_status.is_success() {
+                metrics::record(
+                    &metrics_collector,
+                    "__throttle",
+                    throttle_status,
+                    request_started_at.elapsed(),
+                    None,
+                );
                 return Ok::<Response<entity::GatewayBody>, entity::GatewayError>(
                     entity::get_gateway_response(throttle_status),
                 );
             }
 
             let response = match route_request(incoming_request, &route_config_arr).await {
-                Ok(routed) => upstream::send(routed).await,
-                Err(err) => Err(err),
+                Ok(routed) => {
+                    let route_path = routed.route.path.clone();
+                    match upstream::send(routed).await {
+                        Ok(response) => {
+                            metrics::record(
+                                &metrics_collector,
+                                &route_path,
+                                response.status(),
+                                request_started_at.elapsed(),
+                                None,
+                            );
+                            Ok(response)
+                        }
+                        Err(err) => Err((route_path, err)),
+                    }
+                }
+                Err(err) => Err((metrics_route_label_for_error(&err).to_string(), err)),
             };
 
             match response {
                 Ok(response) => Ok(response),
-                Err(err) => match gateway_response_for_error(&err) {
-                    Some(response) => Ok(response),
+                Err((route_label, err)) => match gateway_response_for_error(&err) {
+                    Some(response) => {
+                        metrics::record(
+                            &metrics_collector,
+                            &route_label,
+                            response.status(),
+                            request_started_at.elapsed(),
+                            Some(&err),
+                        );
+                        Ok(response)
+                    }
                     None => Err(err),
                 },
             }
@@ -74,6 +128,13 @@ where
         .serve_connection(TokioIo::new(gateway_stream), service)
         .await
         .map_err(|err| entity::GatewayError::Io(std::io::Error::other(err)))
+}
+
+fn metrics_route_label_for_error(error: &entity::GatewayError) -> &'static str {
+    match error {
+        entity::GatewayError::RouteNotFound(_) => "__unmatched",
+        _ => "__gateway_error",
+    }
 }
 
 pub fn gateway_response_for_error(

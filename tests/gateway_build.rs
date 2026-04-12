@@ -1,6 +1,6 @@
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::{body::Bytes, Request, Response, StatusCode};
-use hyper_gateway::{config, config::Protocol, entity, logger, route, throttle, trace};
+use hyper_gateway::{config, config::Protocol, entity, logger, metrics, route, throttle, trace};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::{
@@ -191,6 +191,7 @@ async fn spawn_gateway_with_routes(
     db_path: PathBuf,
 ) -> SpawnedGateway {
     let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
+    let metrics_collector = metrics::new_collector();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -198,7 +199,9 @@ async fn spawn_gateway_with_routes(
 
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        route::run(stream, routes, throttle_pool).await.unwrap();
+        route::run(stream, routes, throttle_pool, metrics_collector)
+            .await
+            .unwrap();
     });
 
     SpawnedGateway {
@@ -719,6 +722,49 @@ async fn send_http1_requests_on_connection(
     responses
 }
 
+struct Http1RequestSpec<'a> {
+    method: hyper::Method,
+    host: &'a str,
+    path: &'a str,
+    include_api_key: bool,
+}
+
+async fn send_http1_request_sequence(
+    addr: std::net::SocketAddr,
+    requests: &[Http1RequestSpec<'_>],
+) -> Vec<(StatusCode, hyper::HeaderMap, Bytes)> {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
+        .await
+        .unwrap();
+
+    let conn_task = tokio::spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let mut responses = Vec::with_capacity(requests.len());
+    for request_spec in requests {
+        let mut request_builder = Request::builder()
+            .uri(format!("http://{}{}", request_spec.host, request_spec.path))
+            .method(request_spec.method.clone())
+            .header("host", request_spec.host);
+        if request_spec.include_api_key {
+            request_builder = request_builder.header("api-key", "1");
+        }
+        let request = request_builder.body(Empty::new()).unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        responses.push((status, headers, body));
+    }
+
+    drop(sender);
+    conn_task.await.unwrap();
+    responses
+}
+
 async fn send_h2c_request(addr: std::net::SocketAddr) -> (StatusCode, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -836,6 +882,7 @@ async fn spawn_tls_gateway_once(
     tls_fixture: &TlsFixture,
 ) -> SpawnedGateway {
     let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
+    let metrics_collector = metrics::new_collector();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -851,9 +898,14 @@ async fn spawn_tls_gateway_once(
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let stream = tls_acceptor.accept(stream).await.unwrap();
-        route::serve_connection(stream, Arc::from([route_config]), throttle_pool)
-            .await
-            .unwrap();
+        route::serve_connection(
+            stream,
+            Arc::from([route_config]),
+            throttle_pool,
+            metrics_collector,
+        )
+        .await
+        .unwrap();
     });
 
     SpawnedGateway {
@@ -997,6 +1049,179 @@ async fn serves_management_routes_without_api_key() {
     assert!(body.contains(r#""path":"/admin""#));
     assert!(body.contains(r#""protocol":"h2""#));
     assert!(body.contains(r#""failure_threshold":2"#));
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_metrics_snapshot_for_management_and_proxy_requests() {
+    let upstream = spawn_http1_upstream().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            circuit_breaker: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let responses = send_http1_request_sequence(
+        gateway.addr,
+        &[
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/__gateway/health",
+                include_api_key: false,
+            },
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/",
+                include_api_key: true,
+            },
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/__gateway/metrics",
+                include_api_key: false,
+            },
+        ],
+    )
+    .await;
+
+    let (health_status, _, _) = &responses[0];
+    assert_eq!(*health_status, StatusCode::OK);
+
+    let (proxy_status, _, proxy_body) = &responses[1];
+    assert_eq!(*proxy_status, StatusCode::OK);
+    assert_eq!(*proxy_body, Bytes::from_static(b"http1"));
+
+    let (metrics_status, headers, body) = &responses[2];
+    assert_eq!(*metrics_status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body: serde_json::Value = serde_json::from_slice(body).expect("metrics json");
+    assert_eq!(body["requests_total"], 2);
+    assert_eq!(body["errors_by_kind"], serde_json::json!({}));
+
+    let routes = body["routes"].as_array().expect("routes array");
+    let health_metrics = routes
+        .iter()
+        .find(|item| item["route"] == "/__gateway/health")
+        .expect("health route metrics");
+    assert_eq!(health_metrics["requests"], 1);
+    assert_eq!(health_metrics["responses_by_status"]["200"], 1);
+
+    let proxy_metrics = routes
+        .iter()
+        .find(|item| item["route"] == "/")
+        .expect("proxy route metrics");
+    assert_eq!(proxy_metrics["requests"], 1);
+    assert_eq!(proxy_metrics["responses_by_status"]["200"], 1);
+
+    let metrics_self = routes
+        .iter()
+        .find(|item| item["route"] == "/__gateway/metrics");
+    assert!(metrics_self.is_none());
+
+    gateway.finish().await;
+    upstream.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_metrics_snapshot_with_gateway_errors() {
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("probe listener");
+    let unused_port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: "127.0.0.1".to_string(),
+                port: unused_port.to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            circuit_breaker: None,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            headers: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            rewrite_prefix: None,
+            request_header_filter: config::HeaderFilterConfig::default(),
+            response_header_filter: config::HeaderFilterConfig::default(),
+            path: "/".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let responses = send_http1_request_sequence(
+        gateway.addr,
+        &[
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/",
+                include_api_key: true,
+            },
+            Http1RequestSpec {
+                method: hyper::Method::GET,
+                host: "gateway.local",
+                path: "/__gateway/metrics",
+                include_api_key: false,
+            },
+        ],
+    )
+    .await;
+
+    let (status, _, body) = &responses[0];
+    assert_eq!(*status, StatusCode::BAD_GATEWAY);
+    assert!(body.is_empty());
+
+    let (metrics_status, _, body) = &responses[1];
+    assert_eq!(*metrics_status, StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(body).expect("metrics json");
+    assert_eq!(body["requests_total"], 1);
+    assert_eq!(body["errors_by_kind"]["Io"], 1);
+
+    let routes = body["routes"].as_array().expect("routes array");
+    let proxy_metrics = routes
+        .iter()
+        .find(|item| item["route"] == "/")
+        .expect("proxy route metrics");
+    assert_eq!(proxy_metrics["requests"], 1);
+    assert_eq!(proxy_metrics["responses_by_status"]["502"], 1);
+
     gateway.finish().await;
 }
 

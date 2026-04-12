@@ -1,4 +1,4 @@
-use hyper_gateway::{config, logger, route, throttle, tls};
+use hyper_gateway::{config, logger, metrics, route, throttle, tls};
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]
@@ -13,6 +13,7 @@ async fn main() {
 
     let throttle_pool: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
         throttle::init_throttle().expect("Failed to initialize the throttle!");
+    let metrics_collector = metrics::new_collector();
 
     let gateway_listener = tokio::net::TcpListener::bind(gateway_addr.as_str())
         .await
@@ -40,20 +41,35 @@ async fn main() {
             .expect("Failed to accept a connection from this listener!");
         let route_config_arr = route_config_arr.clone();
         let throttle_pool = throttle_pool.clone();
+        let metrics_collector = metrics_collector.clone();
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
             let result = match tls_acceptor {
                 Some(tls_acceptor) => match tls_acceptor.accept(gateway_stream).await {
                     Ok(stream) => {
-                        route::serve_connection(stream, route_config_arr, throttle_pool).await
+                        route::serve_connection(
+                            stream,
+                            route_config_arr,
+                            throttle_pool,
+                            metrics_collector,
+                        )
+                        .await
                     }
                     Err(err) => {
                         log::error!("Gateway TLS handshake failed: {:?}", err);
                         return;
                     }
                 },
-                None => route::run(gateway_stream, route_config_arr, throttle_pool).await,
+                None => {
+                    route::run(
+                        gateway_stream,
+                        route_config_arr,
+                        throttle_pool,
+                        metrics_collector,
+                    )
+                    .await
+                }
             };
 
             if let Err(err) = result {
