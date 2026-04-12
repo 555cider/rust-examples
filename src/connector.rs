@@ -85,6 +85,7 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         }
     }

@@ -279,6 +279,42 @@ async fn spawn_http1_upstream_with_body_for_connections(
     }
 }
 
+async fn spawn_http1_upstream_echo_path() -> SpawnedUpstream {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service =
+            hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                let path = request
+                    .uri()
+                    .path_and_query()
+                    .map(|value| value.as_str().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(path.into_bytes())))
+                        .unwrap(),
+                )
+            });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .ok();
+    });
+
+    SpawnedUpstream {
+        addr,
+        task: Some(task),
+    }
+}
+
 async fn spawn_slow_http1_upstream(delay_ms: u64) -> SpawnedUpstream {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -684,6 +720,7 @@ async fn supports_http1_gateway_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -718,6 +755,7 @@ async fn round_robins_across_configured_http1_upstreams() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -763,6 +801,7 @@ async fn retries_failed_primary_connection_on_next_upstream() {
             retry_attempts: 1,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -798,6 +837,7 @@ async fn retries_upstream_timeout_on_next_backend() {
             retry_attempts: 1,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -811,6 +851,44 @@ async fn retries_upstream_timeout_on_next_backend() {
     gateway.finish().await;
     slow.finish().await;
     backup.finish().await;
+}
+
+#[tokio::test]
+async fn rewrites_request_prefix_before_forwarding_upstream() {
+    let upstream = spawn_http1_upstream_echo_path().await;
+    let gateway = spawn_gateway_once(
+        config::Route {
+            scheme: "http".to_string(),
+            protocol: config::Protocol::Http1,
+            authority: config::Authority {
+                host: upstream.addr.ip().to_string(),
+                port: upstream.addr.port().to_string(),
+            },
+            upstreams: Arc::from([]),
+            tls: config::RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            rewrite_prefix: Some("/".to_string()),
+            path: "/api".to_string(),
+        },
+        temp_db_path(),
+    )
+    .await;
+
+    let (status, body) = send_http1_request_with(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/api/users?id=7",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, Bytes::from_static(b"/users?id=7"));
+    gateway.finish().await;
+    upstream.finish().await;
 }
 
 #[tokio::test]
@@ -832,6 +910,7 @@ async fn selects_host_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/".to_string(),
             },
             config::Route {
@@ -847,6 +926,7 @@ async fn selects_host_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from(["api.example.com".to_string()]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/".to_string(),
             },
         ]),
@@ -884,6 +964,7 @@ async fn selects_method_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/submit".to_string(),
             },
             config::Route {
@@ -899,6 +980,7 @@ async fn selects_method_specific_route() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from(["POST".to_string()]),
+                rewrite_prefix: None,
                 path: "/submit".to_string(),
             },
         ]),
@@ -939,6 +1021,7 @@ async fn supports_https_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -973,6 +1056,7 @@ async fn supports_http1_gateway_to_https_h2_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1004,6 +1088,7 @@ async fn supports_https_h2_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1035,6 +1120,7 @@ async fn returns_gateway_timeout_when_upstream_is_too_slow() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1065,6 +1151,7 @@ async fn supports_http1_gateway_to_http1_hostname_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1098,6 +1185,7 @@ async fn supports_http1_gateway_to_https_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1133,6 +1221,7 @@ async fn returns_bad_gateway_when_upstream_connect_fails() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1162,6 +1251,7 @@ async fn supports_h2c_gateway_to_h2c_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1192,6 +1282,7 @@ async fn supports_h2c_client_to_http1_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1222,6 +1313,7 @@ async fn supports_http1_client_to_h2c_upstream() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         temp_db_path(),
@@ -1254,6 +1346,7 @@ async fn supports_multi_route_protocol_selection() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/".to_string(),
             },
             config::Route {
@@ -1269,6 +1362,7 @@ async fn supports_multi_route_protocol_selection() {
                 retry_attempts: 0,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/h2".to_string(),
             },
         ]),
@@ -1346,6 +1440,7 @@ async fn dropped_gateway_eventually_removes_temp_db_artifacts() {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         },
         db_path.clone(),

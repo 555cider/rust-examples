@@ -111,10 +111,9 @@ pub fn build_route_uri_for_authority(
     route_config: &config::Route,
     authority: &config::Authority,
 ) -> String {
-    let path_and_query = uri
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/");
+    let path_and_query = rewrite_path_and_query(uri, route_config)
+        .expect("route uri rewrite should succeed")
+        .to_string();
 
     format!(
         "{}://{}{}",
@@ -136,7 +135,7 @@ pub async fn route_request(
         route_config_arr,
     )?;
     let start_index = select_upstream_start_index(&route_config);
-    let request = prepare_request(incoming_request).await?;
+    let request = prepare_request(incoming_request, &route_config).await?;
 
     Ok(upstream::RoutedRequest {
         route: route_config,
@@ -162,22 +161,20 @@ pub fn request_host(headers: &HeaderMap, uri: &hyper::Uri) -> Option<String> {
 
 pub async fn prepare_request(
     request: Request<Incoming>,
+    route_config: &config::Route,
 ) -> Result<PreparedRequest, entity::GatewayError> {
     let traceparent = extract_traceparent(request.headers());
     let (parts, body) = request.into_parts();
     let body = body.collect().await?.to_bytes();
     let mut headers = parts.headers;
     headers.insert("traceparent", traceparent.as_headervalue());
+    let path_and_query = rewrite_path_and_query(&parts.uri, route_config)?;
 
     Ok(PreparedRequest {
         method: parts.method,
         version: parts.version,
         headers,
-        path_and_query: parts
-            .uri
-            .path_and_query()
-            .map(|value| value.as_str().to_string())
-            .unwrap_or_else(|| "/".to_string()),
+        path_and_query,
         body,
     })
 }
@@ -289,6 +286,53 @@ fn normalize_host(host: &str) -> String {
     }
 }
 
+pub fn rewrite_path_and_query(
+    uri: &hyper::Uri,
+    route_config: &config::Route,
+) -> Result<String, entity::GatewayError> {
+    let original_path = uri.path();
+    let query = uri
+        .query()
+        .map(|query| format!("?{}", query))
+        .unwrap_or_default();
+
+    let Some(rewrite_prefix) = route_config.rewrite_prefix.as_deref() else {
+        return Ok(format!("{}{}", original_path, query));
+    };
+
+    if !rewrite_prefix.starts_with('/') {
+        return Err(entity::GatewayError::InvalidRouteConfig(format!(
+            "rewrite_prefix '{}' must start with '/'",
+            rewrite_prefix
+        )));
+    }
+
+    let Some(remainder) = original_path.strip_prefix(route_config.path.as_str()) else {
+        return Err(entity::GatewayError::InvalidRouteConfig(format!(
+            "request path '{}' does not match route prefix '{}'",
+            original_path, route_config.path
+        )));
+    };
+
+    Ok(format!(
+        "{}{}",
+        join_path_prefix(rewrite_prefix, remainder),
+        query
+    ))
+}
+
+fn join_path_prefix(prefix: &str, remainder: &str) -> String {
+    if remainder.is_empty() {
+        return prefix.to_string();
+    }
+
+    match (prefix.ends_with('/'), remainder.starts_with('/')) {
+        (true, true) => format!("{}{}", prefix, &remainder[1..]),
+        (false, false) => format!("{}/{}", prefix, remainder),
+        _ => format!("{}{}", prefix, remainder),
+    }
+}
+
 fn route_balance_key(route_config: &config::Route) -> String {
     let mut key = format!(
         "{}|{:?}|{}|{}|{}",
@@ -348,6 +392,7 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         }
     }
@@ -377,10 +422,65 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         };
 
         assert_eq!(build_route_uri(&uri, &route), "http://[::1]:9000/");
+    }
+
+    #[test]
+    fn rewrite_path_and_query_replaces_prefix_and_preserves_query() {
+        let route = Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            rewrite_prefix: Some("/".to_string()),
+            path: "/api".to_string(),
+        };
+
+        let uri: hyper::Uri = "/api/users?id=7".parse().expect("uri");
+
+        assert_eq!(
+            rewrite_path_and_query(&uri, &route).expect("rewrite should succeed"),
+            "/users?id=7"
+        );
+    }
+
+    #[test]
+    fn rewrite_path_and_query_maps_exact_prefix_to_root() {
+        let route = Route {
+            scheme: "http".to_string(),
+            protocol: Protocol::Http1,
+            authority: Authority {
+                host: "127.0.0.1".to_string(),
+                port: "9000".to_string(),
+            },
+            upstreams: Arc::from([]),
+            hosts: Arc::from([]),
+            methods: Arc::from([]),
+            tls: RouteTlsConfig::default(),
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            rewrite_prefix: Some("/".to_string()),
+            path: "/api".to_string(),
+        };
+
+        let uri: hyper::Uri = "/api".parse().expect("uri");
+
+        assert_eq!(
+            rewrite_path_and_query(&uri, &route).expect("rewrite should succeed"),
+            "/"
+        );
     }
 
     #[test]
@@ -406,6 +506,7 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from(["POST".to_string()]),
+            rewrite_prefix: None,
             path: "/api".to_string(),
         }]);
 
@@ -435,6 +536,7 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         }]);
 
@@ -477,6 +579,7 @@ mod tests {
             retry_attempts: 0,
             hosts: Arc::from([]),
             methods: Arc::from([]),
+            rewrite_prefix: None,
             path: "/".to_string(),
         };
 

@@ -51,6 +51,8 @@ pub struct Route {
     pub timeout_ms: u64,
     #[serde(default = "default_route_retry_attempts")]
     pub retry_attempts: usize,
+    #[serde(default)]
+    pub rewrite_prefix: Option<String>,
     pub path: String,
 }
 
@@ -289,6 +291,28 @@ routes:
     }
 
     #[test]
+    fn parses_route_rewrite_prefix() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    rewrite_prefix: /internal
+    path: /api
+"#,
+        )
+        .expect("rewrite config should parse");
+
+        assert_eq!(
+            config.routes[0].rewrite_prefix.as_deref(),
+            Some("/internal")
+        );
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -359,6 +383,7 @@ route:
                 retry_attempts: default_route_retry_attempts(),
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/".to_string(),
             },
             Route {
@@ -374,6 +399,7 @@ route:
                 retry_attempts: default_route_retry_attempts(),
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
+                rewrite_prefix: None,
                 path: "/h2".to_string(),
             },
         ]);
