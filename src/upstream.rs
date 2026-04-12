@@ -2,6 +2,11 @@ use crate::{config, connector, entity, route};
 use http_body_util::Full;
 use hyper::{body::Bytes, header::HOST, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct RoutedRequest {
@@ -14,9 +19,18 @@ pub struct RoutedRequest {
     pub body: Bytes,
 }
 
+#[derive(Default)]
+struct CircuitBreakerState {
+    consecutive_failures: usize,
+    open_until: Option<Instant>,
+}
+
 pub async fn send(
     routed: RoutedRequest,
 ) -> Result<Response<entity::GatewayBody>, entity::GatewayError> {
+    let circuit_breaker = validate_circuit_breaker_config(&routed.route)?;
+    enforce_circuit_breaker(&routed.route, circuit_breaker)?;
+
     let max_attempts = routed.route.retry_attempts + 1;
     let mut last_error = None;
 
@@ -25,7 +39,10 @@ pub async fn send(
         let request = build_attempt_request(&routed, authority)?;
 
         match send_attempt(&routed.route, authority, request).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                reset_circuit_breaker(&routed.route);
+                return Ok(response);
+            }
             Err(err) if should_retry(&err) && attempt + 1 < max_attempts => {
                 log::warn!(
                     "Upstream attempt {}/{} failed for route '{}': {}",
@@ -36,11 +53,16 @@ pub async fn send(
                 );
                 last_error = Some(err);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                record_circuit_breaker_failure(&routed.route, circuit_breaker, &err);
+                return Err(err);
+            }
         }
     }
 
-    Err(last_error.expect("retry loop should preserve the last retryable error"))
+    let err = last_error.expect("retry loop should preserve the last retryable error");
+    record_circuit_breaker_failure(&routed.route, circuit_breaker, &err);
+    Err(err)
 }
 
 fn build_attempt_request(
@@ -110,6 +132,95 @@ fn should_retry(error: &entity::GatewayError) -> bool {
             | entity::GatewayError::Io(_)
             | entity::GatewayError::Timeout(_)
     )
+}
+
+fn should_trip_circuit_breaker(error: &entity::GatewayError) -> bool {
+    should_retry(error)
+}
+
+fn validate_circuit_breaker_config(
+    route: &config::Route,
+) -> Result<Option<&config::CircuitBreakerConfig>, entity::GatewayError> {
+    let Some(circuit_breaker) = route.circuit_breaker.as_ref() else {
+        return Ok(None);
+    };
+
+    if circuit_breaker.failure_threshold == 0 {
+        return Err(entity::GatewayError::InvalidRouteConfig(format!(
+            "route '{}' circuit_breaker.failure_threshold must be greater than 0",
+            route.path
+        )));
+    }
+
+    if circuit_breaker.open_ms == 0 {
+        return Err(entity::GatewayError::InvalidRouteConfig(format!(
+            "route '{}' circuit_breaker.open_ms must be greater than 0",
+            route.path
+        )));
+    }
+
+    Ok(Some(circuit_breaker))
+}
+
+fn enforce_circuit_breaker(
+    route: &config::Route,
+    circuit_breaker: Option<&config::CircuitBreakerConfig>,
+) -> Result<(), entity::GatewayError> {
+    let Some(_) = circuit_breaker else {
+        return Ok(());
+    };
+
+    let now = Instant::now();
+    let mut states = circuit_breaker_states().lock().unwrap();
+    let Some(state) = states.get_mut(&route.path) else {
+        return Ok(());
+    };
+
+    match state.open_until {
+        Some(open_until) if open_until > now => {
+            Err(entity::GatewayError::CircuitOpen(route.path.clone()))
+        }
+        Some(_) => {
+            state.open_until = None;
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+fn reset_circuit_breaker(route: &config::Route) {
+    if route.circuit_breaker.is_none() {
+        return;
+    }
+
+    circuit_breaker_states().lock().unwrap().remove(&route.path);
+}
+
+fn record_circuit_breaker_failure(
+    route: &config::Route,
+    circuit_breaker: Option<&config::CircuitBreakerConfig>,
+    error: &entity::GatewayError,
+) {
+    let Some(circuit_breaker) = circuit_breaker else {
+        return;
+    };
+
+    if !should_trip_circuit_breaker(error) {
+        return;
+    }
+
+    let mut states = circuit_breaker_states().lock().unwrap();
+    let state = states.entry(route.path.clone()).or_default();
+    state.consecutive_failures += 1;
+
+    if state.consecutive_failures >= circuit_breaker.failure_threshold {
+        state.open_until = Some(Instant::now() + Duration::from_millis(circuit_breaker.open_ms));
+    }
+}
+
+fn circuit_breaker_states() -> &'static Mutex<HashMap<String, CircuitBreakerState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, CircuitBreakerState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 async fn send_on_io<T>(

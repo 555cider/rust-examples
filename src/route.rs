@@ -76,6 +76,7 @@ pub fn gateway_response_for_error(
 ) -> Option<Response<entity::GatewayBody>> {
     let status = match error {
         entity::GatewayError::RouteNotFound(_) => hyper::http::StatusCode::NOT_FOUND,
+        entity::GatewayError::CircuitOpen(_) => hyper::http::StatusCode::SERVICE_UNAVAILABLE,
         entity::GatewayError::Timeout(_) => hyper::http::StatusCode::GATEWAY_TIMEOUT,
         entity::GatewayError::Hyper(_)
         | entity::GatewayError::Io(_)
@@ -512,6 +513,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -546,6 +548,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -576,6 +579,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             rewrite_prefix: Some("/".to_string()),
             request_header_filter: HeaderFilterConfig::default(),
             response_header_filter: HeaderFilterConfig::default(),
@@ -607,6 +611,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             rewrite_prefix: Some("/".to_string()),
             request_header_filter: HeaderFilterConfig::default(),
             response_header_filter: HeaderFilterConfig::default(),
@@ -643,6 +648,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from(["POST".to_string()]),
             headers: std::collections::BTreeMap::new(),
@@ -679,6 +685,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from(["api.example.com".to_string()]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -715,6 +722,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::from([(
@@ -750,6 +758,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),
@@ -806,6 +815,15 @@ mod tests {
     }
 
     #[test]
+    fn circuit_open_maps_to_service_unavailable_response() {
+        let response =
+            gateway_response_for_error(&entity::GatewayError::CircuitOpen("/".to_string()))
+                .expect("circuit open should map to response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
     fn upstream_host_header_uses_selected_authority() {
         let header =
             upstream_host_header(&sample_route(Protocol::Http1).authority).expect("host header");
@@ -826,6 +844,7 @@ mod tests {
             tls: RouteTlsConfig::default(),
             timeout_ms: 30_000,
             retry_attempts: 0,
+            circuit_breaker: None,
             hosts: Arc::from([]),
             methods: Arc::from([]),
             headers: std::collections::BTreeMap::new(),

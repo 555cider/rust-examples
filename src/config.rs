@@ -56,6 +56,8 @@ pub struct Route {
     #[serde(default = "default_route_retry_attempts")]
     pub retry_attempts: usize,
     #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default)]
     pub rewrite_prefix: Option<String>,
     #[serde(default)]
     pub request_header_filter: HeaderFilterConfig,
@@ -76,6 +78,12 @@ pub struct HeaderFilterConfig {
     pub set: BTreeMap<String, String>,
     #[serde(default)]
     pub remove: Arc<[String]>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    pub failure_threshold: usize,
+    pub open_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -391,6 +399,32 @@ routes:
     }
 
     #[test]
+    fn parses_route_circuit_breaker() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    circuit_breaker:
+      failure_threshold: 2
+      open_ms: 250
+    path: /
+"#,
+        )
+        .expect("circuit breaker config should parse");
+
+        let circuit_breaker = config.routes[0]
+            .circuit_breaker
+            .as_ref()
+            .expect("circuit breaker config");
+        assert_eq!(circuit_breaker.failure_threshold, 2);
+        assert_eq!(circuit_breaker.open_ms, 250);
+    }
+
+    #[test]
     fn parses_additional_upstreams() {
         let config = serde_yaml::from_str::<GatewayConfig>(
             r#"
@@ -459,6 +493,7 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: std::collections::BTreeMap::new(),
@@ -479,6 +514,7 @@ route:
                 tls: RouteTlsConfig::default(),
                 timeout_ms: default_route_timeout_ms(),
                 retry_attempts: default_route_retry_attempts(),
+                circuit_breaker: None,
                 hosts: Arc::from([]),
                 methods: Arc::from([]),
                 headers: std::collections::BTreeMap::new(),

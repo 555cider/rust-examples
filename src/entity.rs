@@ -38,6 +38,7 @@ pub enum GatewayError {
     Http(hyper::http::Error),
     Timeout(tokio::time::error::Elapsed),
     RouteNotFound(String),
+    CircuitOpen(String),
     InvalidRouteConfig(String),
 }
 
@@ -49,6 +50,7 @@ impl Display for GatewayError {
             Self::Http(err) => write!(f, "http error: {}", err),
             Self::Timeout(err) => write!(f, "timeout error: {}", err),
             Self::RouteNotFound(path) => write!(f, "route not found: {}", path),
+            Self::CircuitOpen(path) => write!(f, "circuit open: {}", path),
             Self::InvalidRouteConfig(message) => write!(f, "invalid route config: {}", message),
         }
     }
@@ -62,6 +64,7 @@ impl Error for GatewayError {
             Self::Http(err) => Some(err),
             Self::Timeout(err) => Some(err),
             Self::RouteNotFound(_) => None,
+            Self::CircuitOpen(_) => None,
             Self::InvalidRouteConfig(_) => None,
         }
     }
