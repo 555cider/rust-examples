@@ -1,6 +1,18 @@
 use crate::{config, entity};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+pub fn build_client_config(
+    protocol: &config::Protocol,
+    ca_cert_path: Option<&str>,
+) -> Result<rustls::ClientConfig, entity::GatewayError> {
+    let root_store = build_client_root_store(ca_cert_path)?;
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    client_config.alpn_protocols = alpn_protocols(protocol);
+    Ok(client_config)
+}
+
 pub fn build_client_root_store(
     ca_cert_path: Option<&str>,
 ) -> Result<rustls::RootCertStore, entity::GatewayError> {
@@ -38,7 +50,7 @@ pub fn build_server_config(
     let certs = load_certificates(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    rustls::ServerConfig::builder()
+    let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|err| {
@@ -46,7 +58,9 @@ pub fn build_server_config(
                 "failed to build server tls config: {}",
                 err
             ))
-        })
+        })?;
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(server_config)
 }
 
 pub fn load_certificates(path: &str) -> Result<Vec<CertificateDer<'static>>, entity::GatewayError> {
@@ -106,5 +120,13 @@ pub fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, entity::Ga
         })
     } else {
         Ok(PrivateKeyDer::from(PrivatePkcs8KeyDer::from(bytes)))
+    }
+}
+
+fn alpn_protocols(protocol: &config::Protocol) -> Vec<Vec<u8>> {
+    match protocol {
+        config::Protocol::Http1 => vec![b"http/1.1".to_vec()],
+        config::Protocol::H2 => vec![b"h2".to_vec()],
+        config::Protocol::H2c => Vec::new(),
     }
 }

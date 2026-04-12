@@ -31,6 +31,7 @@ impl Default for ServerConfig {
 pub enum Protocol {
     Http1,
     H2c,
+    H2,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -174,6 +175,24 @@ route:
 
         assert_eq!(config.routes[0].protocol, Protocol::Http1);
         assert_eq!(config.routes[1].protocol, Protocol::H2c);
+    }
+
+    #[test]
+    fn parses_h2_routes() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+routes:
+  - scheme: https
+    protocol: h2
+    authority:
+      host: localhost
+      port: 8443
+    path: /
+"#,
+        )
+        .expect("h2 config should parse");
+
+        assert_eq!(config.routes[0].protocol, Protocol::H2);
     }
 
     #[test]

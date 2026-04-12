@@ -18,6 +18,12 @@ pub async fn connect(route: &config::Route) -> Result<UpstreamStream, entity::Ga
 
     let stream = tokio::net::TcpStream::connect((route.authority.host.as_str(), port)).await?;
 
+    if matches!(route.protocol, config::Protocol::H2) && route.scheme != "https" {
+        return Err(entity::GatewayError::InvalidRouteConfig(
+            "protocol 'h2' requires scheme 'https'".to_string(),
+        ));
+    }
+
     match route.scheme.as_str() {
         "http" => Ok(UpstreamStream::Plain(stream)),
         "https" => Ok(UpstreamStream::Tls(connect_tls(route, stream).await?)),
@@ -33,10 +39,7 @@ async fn connect_tls(
     stream: tokio::net::TcpStream,
 ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, entity::GatewayError> {
     let server_name = tls_server_name(&route.authority.host)?;
-    let root_store = tls_root_store(route)?;
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let client_config = tls::build_client_config(&route.protocol, route.tls.ca_cert_path.as_deref())?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
 
     connector.connect(server_name, stream).await.map_err(Into::into)
@@ -54,11 +57,6 @@ fn tls_server_name(host: &str) -> Result<ServerName<'static>, entity::GatewayErr
         })
     }
 }
-
-fn tls_root_store(route: &config::Route) -> Result<rustls::RootCertStore, entity::GatewayError> {
-    tls::build_client_root_store(route.tls.ca_cert_path.as_deref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

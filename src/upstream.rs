@@ -51,7 +51,7 @@ where
                 entity::GatewayBody::Incoming(body),
             ))
         }
-        config::Protocol::H2c => {
+        config::Protocol::H2c | config::Protocol::H2 => {
             let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
                 .handshake::<_, Incoming>(route_io)
                 .await?;
