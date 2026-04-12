@@ -248,6 +248,32 @@ pub fn load_config(path: &str) -> GatewayConfig {
     serde_yaml::from_str(&contents).expect("Failed to parse the configuration file!")
 }
 
+pub fn resolve_config_path() -> Result<String, String> {
+    resolve_config_path_from(std::env::args(), std::env::var("GATEWAY_CONFIG").ok())
+}
+
+pub fn resolve_config_path_from<I, S>(
+    args: I,
+    env_config_path: Option<String>,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<String>>();
+    let cli_args = args.into_iter().skip(1).collect::<Vec<_>>();
+
+    match cli_args.as_slice() {
+        [] => Ok(env_config_path.unwrap_or_else(|| "config.yaml".to_string())),
+        [flag] if flag == "--config" || flag == "-c" => {
+            Err("usage: hyper-gateway [--config <path> | <path>]".to_string())
+        }
+        [path] => Ok(path.clone()),
+        [flag, path] if flag == "--config" || flag == "-c" => Ok(path.clone()),
+        _ => Err("usage: hyper-gateway [--config <path> | <path>]".to_string()),
+    }
+}
+
 pub fn get_route<'a>(path: &str, route: &'a [Route]) -> Option<&'a Route> {
     route
         .iter()
@@ -887,6 +913,63 @@ routes:
             !config.routes.is_empty(),
             "config.yaml should define routes"
         );
+    }
+
+    #[test]
+    fn resolves_default_config_path() {
+        let path = resolve_config_path_from(vec!["gateway"], None).expect("default config path");
+        assert_eq!(path, "config.yaml");
+    }
+
+    #[test]
+    fn resolves_config_path_from_environment() {
+        let path = resolve_config_path_from(vec!["gateway"], Some("config.local.yaml".to_string()))
+            .expect("env config path");
+        assert_eq!(path, "config.local.yaml");
+    }
+
+    #[test]
+    fn resolves_config_path_from_cli_flag() {
+        let path = resolve_config_path_from(
+            vec!["gateway", "--config", "examples/consul.yaml"],
+            Some("config.local.yaml".to_string()),
+        )
+        .expect("cli config path");
+        assert_eq!(path, "examples/consul.yaml");
+    }
+
+    #[test]
+    fn resolves_config_path_from_positional_argument() {
+        let path = resolve_config_path_from(vec!["gateway", "examples/static.yaml"], None)
+            .expect("positional config path");
+        assert_eq!(path, "examples/static.yaml");
+    }
+
+    #[test]
+    fn rejects_invalid_config_cli_arguments() {
+        let err = resolve_config_path_from(vec!["gateway", "--config"], None)
+            .expect_err("invalid cli args should fail");
+        assert!(err.contains("usage: hyper-gateway"));
+    }
+
+    #[test]
+    fn parses_repository_example_configs() {
+        for path in [
+            "examples/static.yaml",
+            "examples/consul.yaml",
+            "examples/eureka.yaml",
+            "examples/management.yaml",
+        ] {
+            let contents = std::fs::read_to_string(path)
+                .unwrap_or_else(|_| panic!("missing example {}", path));
+            let config = serde_yaml::from_str::<GatewayConfig>(&contents)
+                .unwrap_or_else(|_| panic!("example {} should parse", path));
+            assert!(
+                !config.routes.is_empty(),
+                "example {} should define routes",
+                path
+            );
+        }
     }
 
     #[test]

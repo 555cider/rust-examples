@@ -1,6 +1,18 @@
 # Configuration Examples
 
-The gateway currently reads `config.yaml` from its process working directory at startup. The binary does not take a separate config path yet, so the practical place to put your runtime config is the repository root `config.yaml`.
+The gateway loads configuration from:
+
+1. `--config <path>` or `-c <path>`
+2. a single positional config path
+3. `GATEWAY_CONFIG`
+4. `./config.yaml`
+
+Repository examples:
+
+- [examples/static.yaml](/home/my/dev/hyper-gateway/examples/static.yaml:1)
+- [examples/consul.yaml](/home/my/dev/hyper-gateway/examples/consul.yaml:1)
+- [examples/eureka.yaml](/home/my/dev/hyper-gateway/examples/eureka.yaml:1)
+- [examples/management.yaml](/home/my/dev/hyper-gateway/examples/management.yaml:1)
 
 ## Static Routes
 

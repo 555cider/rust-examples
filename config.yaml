@@ -1,6 +1,6 @@
 ---
-# The gateway currently loads ./config.yaml from the process working directory.
-# More complete examples live in docs/configuration-examples.md.
+# Default config path when no CLI flag or GATEWAY_CONFIG override is used.
+# More complete examples live in docs/configuration-examples.md and examples/*.yaml.
 server:
   listen: 127.0.0.1:8080
   # tls:

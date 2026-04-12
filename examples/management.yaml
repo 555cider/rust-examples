@@ -1,0 +1,14 @@
+server:
+  listen: 127.0.0.1:8080
+  management:
+    listen: 127.0.0.1:9000
+    auth_token: change-me
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: api
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/api/**

@@ -1,3 +1,9 @@
 /target
-Cargo.lock
-throttle.db
+/throttle.db
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+config.local.yaml
+.env
+.DS_Store

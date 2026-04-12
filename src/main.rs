@@ -6,7 +6,9 @@ async fn main() {
     logger::init_logger();
     log::info!("Initialized the logger");
 
-    let gateway_config: config::GatewayConfig = config::load_config("config.yaml");
+    let config_path = config::resolve_config_path().expect("Failed to resolve configuration path");
+    log::info!("Loading config from {}", config_path);
+    let gateway_config: config::GatewayConfig = config::load_config(config_path.as_str());
     let gateway_addr = gateway_config.server.listen.clone();
     let gateway_tls = gateway_config.server.tls.clone();
     let management_config = gateway_config.server.management.clone();
