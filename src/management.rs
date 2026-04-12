@@ -10,7 +10,17 @@ pub fn handle(
     request: &Request<hyper::body::Incoming>,
     routes: &[config::Route],
     metrics_collector: &metrics::MetricsCollector,
+    management_config: &config::ManagementConfig,
 ) -> Result<Option<Response<entity::GatewayBody>>, entity::GatewayError> {
+    match request.uri().path() {
+        HEALTH_PATH | ROUTES_PATH | METRICS_PATH => {
+            if let Some(response) = unauthorized_management_response(request, management_config) {
+                return Ok(Some(response));
+            }
+        }
+        _ => {}
+    }
+
     match request.uri().path() {
         HEALTH_PATH => Ok(Some(handle_health(request.method()))),
         ROUTES_PATH => Ok(Some(handle_routes(request.method(), routes)?)),
@@ -73,6 +83,32 @@ fn handle_metrics(
         StatusCode::OK,
         Bytes::from(body),
     ))
+}
+
+fn unauthorized_management_response(
+    request: &Request<hyper::body::Incoming>,
+    management_config: &config::ManagementConfig,
+) -> Option<Response<entity::GatewayBody>> {
+    let Some(auth_token) = management_config.auth_token.as_deref() else {
+        return None;
+    };
+
+    let authorization = request
+        .headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let expected = format!("Bearer {}", auth_token);
+    if authorization == Some(expected.as_str()) {
+        None
+    } else {
+        Some(
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(hyper::header::WWW_AUTHENTICATE, "Bearer")
+                .body(entity::GatewayBody::Empty)
+                .expect("unauthorized management response"),
+        )
+    }
 }
 
 #[derive(Serialize)]

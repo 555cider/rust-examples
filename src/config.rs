@@ -15,6 +15,8 @@ pub struct ServerConfig {
     pub listen: String,
     #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
+    #[serde(default)]
+    pub management: ManagementConfig,
 }
 
 impl Default for ServerConfig {
@@ -22,6 +24,7 @@ impl Default for ServerConfig {
         Self {
             listen: default_listen_addr(),
             tls: None,
+            management: ManagementConfig::default(),
         }
     }
 }
@@ -100,6 +103,12 @@ pub struct ServerTlsConfig {
     pub key_path: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct ManagementConfig {
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
 fn default_listen_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
@@ -175,6 +184,30 @@ routes:
         let tls = config.server.tls.expect("server tls");
         assert_eq!(tls.cert_path.as_deref(), Some("/tmp/gateway-cert.der"));
         assert_eq!(tls.key_path.as_deref(), Some("/tmp/gateway-key.der"));
+    }
+
+    #[test]
+    fn parses_server_management_auth_token() {
+        let config = serde_yaml::from_str::<GatewayConfig>(
+            r#"
+server:
+  management:
+    auth_token: secret-token
+routes:
+  - scheme: http
+    protocol: http1
+    authority:
+      host: localhost
+      port: 8001
+    path: /
+"#,
+        )
+        .expect("management auth config should parse");
+
+        assert_eq!(
+            config.server.management.auth_token.as_deref(),
+            Some("secret-token")
+        );
     }
 
     #[test]

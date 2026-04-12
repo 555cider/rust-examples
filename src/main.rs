@@ -9,6 +9,7 @@ async fn main() {
     let gateway_config: config::GatewayConfig = config::load_config("config.yaml");
     let gateway_addr = gateway_config.server.listen.clone();
     let gateway_tls = gateway_config.server.tls.clone();
+    let management_config = gateway_config.server.management.clone();
     let route_config_arr: Arc<[config::Route]> = gateway_config.routes;
 
     let throttle_pool: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
@@ -42,6 +43,7 @@ async fn main() {
         let route_config_arr = route_config_arr.clone();
         let throttle_pool = throttle_pool.clone();
         let metrics_collector = metrics_collector.clone();
+        let management_config = management_config.clone();
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
@@ -53,6 +55,7 @@ async fn main() {
                             route_config_arr,
                             throttle_pool,
                             metrics_collector,
+                            management_config,
                         )
                         .await
                     }
@@ -67,6 +70,7 @@ async fn main() {
                         route_config_arr,
                         throttle_pool,
                         metrics_collector,
+                        management_config,
                     )
                     .await
                 }

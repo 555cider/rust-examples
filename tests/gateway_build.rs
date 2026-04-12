@@ -199,7 +199,13 @@ async fn spawn_gateway_with_routes(
 
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        route::run(stream, routes, throttle_pool, metrics_collector)
+        route::run(
+            stream,
+            routes,
+            throttle_pool,
+            metrics_collector,
+            config::ManagementConfig::default(),
+        )
             .await
             .unwrap();
     });
@@ -664,6 +670,16 @@ async fn send_http1_request_without_api_key(
     host: &str,
     path: &str,
 ) -> (StatusCode, hyper::HeaderMap, Bytes) {
+    send_http1_request_without_api_key_with_headers(addr, method, host, path, &[]).await
+}
+
+async fn send_http1_request_without_api_key_with_headers(
+    addr: std::net::SocketAddr,
+    method: hyper::Method,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, hyper::HeaderMap, Bytes) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake::<_, Empty<Bytes>>(TokioIo::new(stream))
@@ -674,12 +690,14 @@ async fn send_http1_request_without_api_key(
         conn.await.unwrap();
     });
 
-    let request = Request::builder()
+    let mut request_builder = Request::builder()
         .uri(format!("http://{host}{path}"))
         .method(method)
-        .header("host", host)
-        .body(Empty::new())
-        .unwrap();
+        .header("host", host);
+    for (name, value) in extra_headers {
+        request_builder = request_builder.header(*name, *value);
+    }
+    let request = request_builder.body(Empty::new()).unwrap();
     let response = sender.send_request(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
@@ -903,6 +921,39 @@ async fn spawn_tls_gateway_once(
             Arc::from([route_config]),
             throttle_pool,
             metrics_collector,
+            config::ManagementConfig::default(),
+        )
+        .await
+        .unwrap();
+    });
+
+    SpawnedGateway {
+        addr,
+        task: Some(task),
+        db_guard: TempDbGuard::new(db_path),
+    }
+}
+
+async fn spawn_gateway_with_management_config(
+    routes: Arc<[config::Route]>,
+    db_path: PathBuf,
+    management_config: config::ManagementConfig,
+) -> SpawnedGateway {
+    let throttle_pool = throttle::init_throttle_at(&db_path).expect("throttle pool");
+    let metrics_collector = metrics::new_collector();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        route::run(
+            stream,
+            routes,
+            throttle_pool,
+            metrics_collector,
+            management_config,
         )
         .await
         .unwrap();
@@ -1221,6 +1272,69 @@ async fn serves_management_metrics_snapshot_with_gateway_errors() {
         .expect("proxy route metrics");
     assert_eq!(proxy_metrics["requests"], 1);
     assert_eq!(proxy_metrics["responses_by_status"]["502"], 1);
+
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn rejects_management_requests_without_configured_bearer_token() {
+    let gateway = spawn_gateway_with_management_config(
+        Arc::from([]),
+        temp_db_path(),
+        config::ManagementConfig {
+            auth_token: Some("secret-token".to_string()),
+        },
+    )
+    .await;
+
+    let (status, headers, body) = send_http1_request_without_api_key(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/health",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        headers
+            .get(hyper::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+    assert!(body.is_empty());
+
+    gateway.finish().await;
+}
+
+#[tokio::test]
+async fn serves_management_requests_with_configured_bearer_token() {
+    let gateway = spawn_gateway_with_management_config(
+        Arc::from([]),
+        temp_db_path(),
+        config::ManagementConfig {
+            auth_token: Some("secret-token".to_string()),
+        },
+    )
+    .await;
+
+    let (status, headers, body) = send_http1_request_without_api_key_with_headers(
+        gateway.addr,
+        hyper::Method::GET,
+        "gateway.local",
+        "/__gateway/health",
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert_eq!(body, Bytes::from_static(br#"{"status":"UP"}"#));
 
     gateway.finish().await;
 }

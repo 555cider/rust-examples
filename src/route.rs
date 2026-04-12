@@ -23,12 +23,14 @@ pub async fn run(
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
     metrics_collector: metrics::MetricsCollector,
+    management_config: config::ManagementConfig,
 ) -> Result<(), entity::GatewayError> {
     serve_connection(
         gateway_stream,
         route_config_arr_clone,
         throttle_pool_clone,
         metrics_collector,
+        management_config,
     )
     .await
 }
@@ -38,6 +40,7 @@ pub async fn serve_connection<T>(
     route_config_arr_clone: Arc<[config::Route]>,
     throttle_pool_clone: Arc<Mutex<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>>,
     metrics_collector: metrics::MetricsCollector,
+    management_config: config::ManagementConfig,
 ) -> Result<(), entity::GatewayError>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -46,13 +49,18 @@ where
         let route_config_arr = route_config_arr_clone.clone();
         let throttle_pool = throttle_pool_clone.clone();
         let metrics_collector = metrics_collector.clone();
+        let management_config = management_config.clone();
 
         async move {
             let request_path = incoming_request.uri().path().to_string();
             let request_started_at = Instant::now();
 
-            if let Some(response) =
-                crate::management::handle(&incoming_request, &route_config_arr, &metrics_collector)?
+            if let Some(response) = crate::management::handle(
+                &incoming_request,
+                &route_config_arr,
+                &metrics_collector,
+                &management_config,
+            )?
             {
                 if !crate::management::is_metrics_path(&request_path) {
                     metrics::record(
