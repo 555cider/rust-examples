@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 use crate::error::{AppError, Result};
 
@@ -10,6 +10,8 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub database_url: String,
     pub database_max_connections: u32,
+    pub issuer: String,
+    pub signing_key_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -26,11 +28,18 @@ impl Config {
             })?,
             Err(_) => DEFAULT_DATABASE_MAX_CONNECTIONS,
         };
+        let issuer =
+            env::var("AUTH_SERVER_ISSUER").unwrap_or_else(|_| format!("http://{bind_addr}"));
+        let signing_key_path = env::var("AUTH_SERVER_SIGNING_KEY_PATH")
+            .ok()
+            .map(PathBuf::from);
 
         Ok(Self {
             bind_addr,
             database_url,
             database_max_connections,
+            issuer,
+            signing_key_path,
         })
     }
 }

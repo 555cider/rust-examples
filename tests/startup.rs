@@ -20,6 +20,8 @@ async fn app_starts_and_serves_health() {
             database_url: std::env::var("DATABASE_URL")
                 .expect("DATABASE_URL must be set for startup test"),
             database_max_connections: 5,
+            issuer: format!("http://{bind_addr}"),
+            signing_key_path: None,
         },
         async {
             let _ = shutdown_rx.await;

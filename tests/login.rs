@@ -33,6 +33,8 @@ async fn spawn_server(database_url: String) -> (SocketAddr, oneshot::Sender<()>,
                 bind_addr,
                 database_url,
                 database_max_connections: 5,
+                issuer: format!("http://{bind_addr}"),
+                signing_key_path: None,
             },
             async {
                 let _ = shutdown_rx.await;

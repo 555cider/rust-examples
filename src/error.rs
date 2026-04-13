@@ -18,6 +18,8 @@ pub enum AppError {
     Database(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("token error: {0}")]
+    Token(String),
 }
 
 impl From<argon2::password_hash::Error> for AppError {
