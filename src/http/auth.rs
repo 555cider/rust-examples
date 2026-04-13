@@ -8,7 +8,7 @@ use crate::{
     state::AppState,
 };
 
-const SESSION_COOKIE_NAME: &str = "auth_server_session";
+pub const SESSION_COOKIE_NAME: &str = "auth_server_session";
 const SESSION_TTL_SECONDS: i32 = 60 * 60 * 12;
 
 #[derive(Debug, Deserialize)]

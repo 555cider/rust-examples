@@ -29,6 +29,7 @@ pub fn build_application_router(
         .route("/healthz", axum::routing::get(http::health::health_check))
         .merge(http::auth::build_router())
         .merge(http::oidc::build_router())
+        .merge(http::oauth::build_router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
