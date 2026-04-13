@@ -30,6 +30,7 @@ pub fn build_application_router(
         .merge(http::auth::build_router())
         .merge(http::oidc::build_router())
         .merge(http::oauth::build_router())
+        .merge(http::policy::build_router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

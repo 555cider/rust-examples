@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod identity;
 pub mod oauth;
+pub mod policy;
 pub mod state;
 pub mod token;
 
@@ -12,5 +13,6 @@ pub mod http {
     pub mod health;
     pub mod oauth;
     pub mod oidc;
+    pub mod policy;
     pub mod router;
 }
