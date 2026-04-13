@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::get,
 };
@@ -9,6 +9,8 @@ use serde::Serialize;
 use sqlx::types::Uuid;
 
 use crate::{identity::repository, state::AppState};
+
+const PUBLIC_METADATA_CACHE_CONTROL: &str = "public, max-age=300";
 
 pub fn build_router() -> Router<AppState> {
     Router::new()
@@ -20,42 +22,52 @@ pub fn build_router() -> Router<AppState> {
         .route("/userinfo", get(userinfo))
 }
 
-async fn openid_configuration(State(state): State<AppState>) -> Json<OpenIdConfiguration> {
+async fn openid_configuration(State(state): State<AppState>) -> impl IntoResponse {
     let issuer = state.issuer.trim_end_matches('/').to_owned();
 
-    Json(OpenIdConfiguration {
-        issuer: issuer.clone(),
-        jwks_uri: format!("{issuer}/jwks.json"),
-        authorization_endpoint: format!("{issuer}/authorize"),
-        token_endpoint: format!("{issuer}/token"),
-        userinfo_endpoint: format!("{issuer}/userinfo"),
-        response_types_supported: vec!["code"],
-        subject_types_supported: vec!["public"],
-        id_token_signing_alg_values_supported: vec!["EdDSA"],
-        grant_types_supported: vec!["authorization_code", "client_credentials", "refresh_token"],
-        token_endpoint_auth_methods_supported: vec![
-            "client_secret_basic",
-            "client_secret_post",
-            "none",
-        ],
-        scopes_supported: vec!["openid", "profile", "email", "offline_access"],
-        claims_supported: vec![
-            "iss",
-            "sub",
-            "aud",
-            "exp",
-            "iat",
-            "jti",
-            "scope",
-            "roles",
-            "client_id",
-            "azp",
-        ],
-    })
+    (
+        [(header::CACHE_CONTROL, cache_control_value())],
+        Json(OpenIdConfiguration {
+            issuer: issuer.clone(),
+            jwks_uri: format!("{issuer}/jwks.json"),
+            authorization_endpoint: format!("{issuer}/authorize"),
+            token_endpoint: format!("{issuer}/token"),
+            userinfo_endpoint: format!("{issuer}/userinfo"),
+            response_types_supported: vec!["code"],
+            subject_types_supported: vec!["public"],
+            id_token_signing_alg_values_supported: vec!["EdDSA"],
+            grant_types_supported: vec![
+                "authorization_code",
+                "client_credentials",
+                "refresh_token",
+            ],
+            token_endpoint_auth_methods_supported: vec![
+                "client_secret_basic",
+                "client_secret_post",
+                "none",
+            ],
+            scopes_supported: vec!["openid", "profile", "email", "offline_access"],
+            claims_supported: vec![
+                "iss",
+                "sub",
+                "aud",
+                "exp",
+                "iat",
+                "jti",
+                "scope",
+                "roles",
+                "client_id",
+                "azp",
+            ],
+        }),
+    )
 }
 
-async fn jwks(State(state): State<AppState>) -> Json<crate::token::JwkSet> {
-    Json(state.token_service.jwks())
+async fn jwks(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, cache_control_value())],
+        Json(state.token_service.jwks()),
+    )
 }
 
 async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -122,4 +134,8 @@ struct UserInfoResponse {
     sub: String,
     preferred_username: String,
     email: String,
+}
+
+fn cache_control_value() -> HeaderValue {
+    HeaderValue::from_static(PUBLIC_METADATA_CACHE_CONTROL)
 }

@@ -94,6 +94,12 @@ async fn openid_configuration_exposes_core_endpoints(pool: PgPool) {
         .expect("discovery request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(reqwest::header::CACHE_CONTROL),
+        Some(&reqwest::header::HeaderValue::from_static(
+            "public, max-age=300"
+        ))
+    );
 
     let json: serde_json::Value = response.json().await.expect("response should be json");
     assert_eq!(json["issuer"], issuer);
@@ -127,6 +133,12 @@ async fn jwks_endpoint_exposes_single_eddsa_signing_key(pool: PgPool) {
         .expect("jwks request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(reqwest::header::CACHE_CONTROL),
+        Some(&reqwest::header::HeaderValue::from_static(
+            "public, max-age=300"
+        ))
+    );
 
     let json: serde_json::Value = response.json().await.expect("response should be json");
     let keys = json["keys"].as_array().expect("jwks should contain keys");
