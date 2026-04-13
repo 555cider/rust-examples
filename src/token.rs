@@ -5,9 +5,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, pkcs8::DecodePrivateKey};
 use rand::rngs::OsRng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -98,11 +98,6 @@ impl TokenService {
             .as_secs() as i64;
         let expires_at = issued_at + params.ttl_seconds as i64;
 
-        let header = JwtHeader {
-            alg: "EdDSA",
-            typ: "JWT",
-            kid: self.signing_keys.public_jwk.kid.clone(),
-        };
         let claims = AccessTokenClaims {
             iss: self.issuer.clone(),
             sub: params.subject.to_owned(),
@@ -116,8 +111,75 @@ impl TokenService {
             azp: params.authorized_party.map(str::to_owned),
         };
 
+        self.sign_claims(&claims)
+    }
+
+    pub fn issue_id_token(&self, params: IdTokenParams<'_>) -> Result<String> {
+        let issued_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| AppError::Token(error.to_string()))?
+            .as_secs() as i64;
+        let expires_at = issued_at + params.ttl_seconds as i64;
+
+        let claims = IdTokenClaims {
+            iss: self.issuer.clone(),
+            sub: params.subject.to_owned(),
+            aud: params.audience.to_owned(),
+            exp: expires_at,
+            iat: issued_at,
+            nonce: params.nonce.map(str::to_owned),
+        };
+
+        self.sign_claims(&claims)
+    }
+
+    pub fn verify(&self, token: &str) -> Result<VerifiedTokenClaims> {
+        let segments: Vec<&str> = token.split('.').collect();
+        if segments.len() != 3 {
+            return Err(AppError::Token("invalid token format".to_owned()));
+        }
+
+        let signing_input = format!("{}.{}", segments[0], segments[1]);
+        let signature_bytes = URL_SAFE_NO_PAD
+            .decode(segments[2])
+            .map_err(|error| AppError::Token(error.to_string()))?;
+        let signature = Signature::from_slice(&signature_bytes)
+            .map_err(|error| AppError::Token(error.to_string()))?;
+
+        self.signing_keys
+            .signing_key
+            .verifying_key()
+            .verify(signing_input.as_bytes(), &signature)
+            .map_err(|error| AppError::Token(error.to_string()))?;
+
+        let claims_bytes = URL_SAFE_NO_PAD
+            .decode(segments[1])
+            .map_err(|error| AppError::Token(error.to_string()))?;
+        let claims: VerifiedTokenClaims = serde_json::from_slice(&claims_bytes)
+            .map_err(|error| AppError::Token(error.to_string()))?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| AppError::Token(error.to_string()))?
+            .as_secs() as i64;
+        if claims.iss != self.issuer {
+            return Err(AppError::Token("issuer mismatch".to_owned()));
+        }
+        if claims.exp <= now {
+            return Err(AppError::Token("token expired".to_owned()));
+        }
+
+        Ok(claims)
+    }
+
+    fn sign_claims<T: Serialize>(&self, claims: &T) -> Result<String> {
+        let header = JwtHeader {
+            alg: "EdDSA",
+            typ: "JWT",
+            kid: self.signing_keys.public_jwk.kid.clone(),
+        };
         let encoded_header = encode_json(&header)?;
-        let encoded_claims = encode_json(&claims)?;
+        let encoded_claims = encode_json(claims)?;
         let signing_input = format!("{encoded_header}.{encoded_claims}");
         let signature = self.signing_keys.signing_key.sign(signing_input.as_bytes());
         let encoded_signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
@@ -133,6 +195,13 @@ pub struct AccessTokenParams<'a> {
     pub roles: Option<Vec<String>>,
     pub client_id: Option<&'a str>,
     pub authorized_party: Option<&'a str>,
+    pub ttl_seconds: u64,
+}
+
+pub struct IdTokenParams<'a> {
+    pub subject: &'a str,
+    pub audience: &'a str,
+    pub nonce: Option<&'a str>,
     pub ttl_seconds: u64,
 }
 
@@ -158,6 +227,38 @@ struct AccessTokenClaims {
     client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     azp: Option<String>,
+}
+
+#[derive(Serialize)]
+struct IdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    exp: i64,
+    iat: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifiedTokenClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub exp: i64,
+    pub iat: i64,
+    #[serde(default)]
+    pub jti: Option<String>,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub azp: Option<String>,
+    #[serde(default)]
+    pub nonce: Option<String>,
 }
 
 fn encode_json<T: Serialize>(value: &T) -> Result<String> {

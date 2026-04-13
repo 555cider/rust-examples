@@ -13,7 +13,7 @@ use crate::{
     identity::session,
     oauth::{self, AuthorizationRequest, OAuthError, TokenRequest},
     state::AppState,
-    token::AccessTokenParams,
+    token::{AccessTokenParams, IdTokenParams},
 };
 
 const ACCESS_TOKEN_TTL_SECONDS: u64 = 300;
@@ -27,6 +27,7 @@ struct AuthorizeQuery {
     state: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    nonce: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -37,6 +38,8 @@ struct TokenResponse {
     scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -100,6 +103,7 @@ async fn authorize(
         user_id,
         &query.redirect_uri,
         requested_scope,
+        query.nonce.as_deref(),
         query.code_challenge.as_deref(),
         query.code_challenge_method.as_deref(),
     )
@@ -205,6 +209,23 @@ async fn handle_authorization_code_token(
     } else {
         None
     };
+    let id_token = if authorization_code
+        .scope
+        .split_whitespace()
+        .any(|scope| scope == "openid")
+    {
+        match state.token_service.issue_id_token(IdTokenParams {
+            subject: &authorization_code.user_id.to_string(),
+            audience: &client.client_id,
+            nonce: authorization_code.nonce.as_deref(),
+            ttl_seconds: ACCESS_TOKEN_TTL_SECONDS,
+        }) {
+            Ok(token) => Some(token),
+            Err(_) => return oauth_error_response(OAuthError::InvalidRequest("server_error")),
+        }
+    } else {
+        None
+    };
 
     let access_token = match state.token_service.issue_access_token(AccessTokenParams {
         subject: &authorization_code.user_id.to_string(),
@@ -227,6 +248,7 @@ async fn handle_authorization_code_token(
             expires_in: ACCESS_TOKEN_TTL_SECONDS,
             scope: authorization_code.scope,
             refresh_token,
+            id_token,
         }),
     )
         .into_response()
@@ -275,6 +297,7 @@ async fn handle_client_credentials_token(
             expires_in: ACCESS_TOKEN_TTL_SECONDS,
             scope: requested_scope.to_owned(),
             refresh_token: None,
+            id_token: None,
         }),
     )
         .into_response()
@@ -320,6 +343,7 @@ async fn handle_refresh_token(
             expires_in: ACCESS_TOKEN_TTL_SECONDS,
             scope: stored_refresh.scope,
             refresh_token: Some(rotated_refresh_token.plain_text),
+            id_token: None,
         }),
     )
         .into_response()

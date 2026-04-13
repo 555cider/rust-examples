@@ -34,6 +34,7 @@ pub struct AuthorizationCodeRecord {
     pub user_id: Uuid,
     pub client_id: Uuid,
     pub scope: String,
+    pub nonce: Option<String>,
     pub pkce_code_challenge: Option<String>,
     pub pkce_code_challenge_method: Option<String>,
 }
@@ -185,6 +186,7 @@ pub async fn store_authorization_code(
     user_id: Uuid,
     redirect_uri: &str,
     scope: &str,
+    nonce: Option<&str>,
     code_challenge: Option<&str>,
     code_challenge_method: Option<&str>,
 ) -> Result<StoredAuthorizationCode> {
@@ -199,11 +201,12 @@ pub async fn store_authorization_code(
             user_id,
             redirect_uri,
             scope,
+            nonce,
             pkce_code_challenge,
             pkce_code_challenge_method,
             expires_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, now() + ($8 * interval '1 second'))
+        values ($1, $2, $3, $4, $5, $6, $7, $8, now() + ($9 * interval '1 second'))
         "#,
     )
     .bind(&hash)
@@ -211,6 +214,7 @@ pub async fn store_authorization_code(
     .bind(user_id)
     .bind(redirect_uri)
     .bind(scope)
+    .bind(nonce)
     .bind(code_challenge)
     .bind(code_challenge_method)
     .bind(AUTHORIZATION_CODE_TTL_SECONDS)
@@ -237,6 +241,7 @@ pub async fn consume_authorization_code(
             user_id,
             client_id,
             scope,
+            nonce,
             pkce_code_challenge,
             pkce_code_challenge_method
         from oauth_authorization_codes

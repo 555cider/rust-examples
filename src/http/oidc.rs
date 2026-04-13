@@ -1,7 +1,14 @@
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::get,
+};
 use serde::Serialize;
+use sqlx::types::Uuid;
 
-use crate::state::AppState;
+use crate::{identity::repository, state::AppState};
 
 pub fn build_router() -> Router<AppState> {
     Router::new()
@@ -10,6 +17,7 @@ pub fn build_router() -> Router<AppState> {
             get(openid_configuration),
         )
         .route("/jwks.json", get(jwks))
+        .route("/userinfo", get(userinfo))
 }
 
 async fn openid_configuration(State(state): State<AppState>) -> Json<OpenIdConfiguration> {
@@ -50,6 +58,49 @@ async fn jwks(State(state): State<AppState>) -> Json<crate::token::JwkSet> {
     Json(state.token_service.jwks())
 }
 
+async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let authorization = match headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => value,
+        None => return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response(),
+    };
+    let token = match authorization.strip_prefix("Bearer ") {
+        Some(token) => token,
+        None => return (StatusCode::UNAUTHORIZED, "invalid bearer token").into_response(),
+    };
+
+    let claims = match state.token_service.verify(token) {
+        Ok(claims) => claims,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
+    };
+    if !claims
+        .scope
+        .split_whitespace()
+        .any(|scope| scope == "openid")
+    {
+        return (StatusCode::FORBIDDEN, "openid scope required").into_response();
+    }
+
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(user_id) => user_id,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "invalid subject").into_response(),
+    };
+    let profile = match repository::find_user_profile(&state.db_pool, user_id).await {
+        Ok(Some(profile)) => profile,
+        Ok(None) => return (StatusCode::UNAUTHORIZED, "unknown subject").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
+    };
+
+    Json(UserInfoResponse {
+        sub: profile.id.to_string(),
+        preferred_username: profile.username,
+        email: profile.email,
+    })
+    .into_response()
+}
+
 #[derive(Serialize)]
 struct OpenIdConfiguration {
     issuer: String,
@@ -64,4 +115,11 @@ struct OpenIdConfiguration {
     token_endpoint_auth_methods_supported: Vec<&'static str>,
     scopes_supported: Vec<&'static str>,
     claims_supported: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct UserInfoResponse {
+    sub: String,
+    preferred_username: String,
+    email: String,
 }

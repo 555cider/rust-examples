@@ -8,6 +8,13 @@ pub struct UserPasswordCredential {
     pub password_hash: String,
 }
 
+#[derive(Debug, FromRow)]
+pub struct UserProfile {
+    pub id: Uuid,
+    pub username: String,
+    pub email: String,
+}
+
 pub async fn find_user_password_credential(
     pool: &PgPool,
     username: &str,
@@ -63,4 +70,20 @@ pub async fn revoke_session(pool: &PgPool, session_token_hash: &str) -> Result<(
     .await?;
 
     Ok(())
+}
+
+pub async fn find_user_profile(pool: &PgPool, user_id: Uuid) -> Result<Option<UserProfile>> {
+    let profile = sqlx::query_as(
+        r#"
+        select id, username, email
+        from users
+        where id = $1
+          and is_active = true
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(profile)
 }
