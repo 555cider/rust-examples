@@ -27,6 +27,7 @@ pub fn build_application_router(
 
     axum::Router::<AppState>::new()
         .route("/healthz", axum::routing::get(http::health::health_check))
+        .merge(http::admin::build_router())
         .merge(http::auth::build_router())
         .merge(http::oidc::build_router())
         .merge(http::oauth::build_router())

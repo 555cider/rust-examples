@@ -7,8 +7,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
+    audit::{self, AuditEvent},
     http::auth::SESSION_COOKIE_NAME,
     identity::session,
     oauth::{self, AuthorizationRequest, OAuthError, TokenRequest},
@@ -112,6 +114,26 @@ async fn authorize(
         Ok(code) => code,
         Err(_) => return oauth_error_response(OAuthError::InvalidRequest("server_error")),
     };
+
+    if audit::record(
+        &state.db_pool,
+        AuditEvent {
+            actor_type: "user",
+            actor_id: Some(user_id),
+            event_type: "oauth.authorization_code.issued",
+            target_type: Some("oauth_client"),
+            target_id: Some(client.id),
+            metadata: json!({
+                "client_id": client.client_id,
+                "scope": requested_scope
+            }),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return oauth_error_response(OAuthError::InvalidRequest("server_error"));
+    }
 
     let mut redirect_uri: url::Url = match url::Url::parse(&query.redirect_uri) {
         Ok(url) => url,
@@ -240,6 +262,27 @@ async fn handle_authorization_code_token(
         Err(_) => return oauth_error_response(OAuthError::InvalidRequest("server_error")),
     };
 
+    if audit::record(
+        &state.db_pool,
+        AuditEvent {
+            actor_type: "user",
+            actor_id: Some(authorization_code.user_id),
+            event_type: "oauth.token.authorization_code_issued",
+            target_type: Some("oauth_client"),
+            target_id: Some(client.id),
+            metadata: json!({
+                "client_id": client.client_id,
+                "scope": authorization_code.scope,
+                "refresh_token_issued": refresh_token.is_some()
+            }),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return oauth_error_response(OAuthError::InvalidRequest("server_error"));
+    }
+
     (
         StatusCode::OK,
         axum::Json(TokenResponse {
@@ -288,6 +331,26 @@ async fn handle_client_credentials_token(
         Ok(token) => token,
         Err(_) => return oauth_error_response(OAuthError::InvalidRequest("server_error")),
     };
+
+    if audit::record(
+        &state.db_pool,
+        AuditEvent {
+            actor_type: "client",
+            actor_id: None,
+            event_type: "oauth.token.client_credentials_issued",
+            target_type: Some("oauth_client"),
+            target_id: Some(client.id),
+            metadata: json!({
+                "client_id": client.client_id,
+                "scope": requested_scope
+            }),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return oauth_error_response(OAuthError::InvalidRequest("server_error"));
+    }
 
     (
         StatusCode::OK,

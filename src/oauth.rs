@@ -1,5 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{
     FromRow, PgPool,
@@ -8,6 +9,7 @@ use sqlx::{
 };
 
 use crate::{
+    audit::{self, AuditEvent},
     error::{AppError, Result},
     identity::{password, session},
 };
@@ -367,6 +369,27 @@ pub async fn rotate_refresh_token(
     .ok_or(OAuthError::InvalidGrant)?;
 
     if record.rotated_at_present || record.reused_at_present {
+        audit::record(
+            &mut *transaction,
+            AuditEvent {
+                actor_type: if record.user_id.is_some() {
+                    "user"
+                } else {
+                    "client"
+                },
+                actor_id: record.user_id,
+                event_type: "oauth.token.refresh_reuse_detected",
+                target_type: Some("oauth_client"),
+                target_id: Some(client.id),
+                metadata: json!({
+                    "client_id": client.client_id,
+                    "scope": record.scope
+                }),
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+
         sqlx::query(
             r#"
             update oauth_refresh_tokens
@@ -425,6 +448,27 @@ pub async fn rotate_refresh_token(
     .fetch_one(&mut *transaction)
     .await
     .map_err(internal_sqlx_error)?;
+
+    audit::record(
+        &mut *transaction,
+        AuditEvent {
+            actor_type: if record.user_id.is_some() {
+                "user"
+            } else {
+                "client"
+            },
+            actor_id: record.user_id,
+            event_type: "oauth.token.refresh_rotated",
+            target_type: Some("oauth_client"),
+            target_id: Some(client.id),
+            metadata: json!({
+                "client_id": client.client_id,
+                "scope": record.scope
+            }),
+        },
+    )
+    .await
+    .map_err(internal_error)?;
 
     transaction.commit().await.map_err(internal_sqlx_error)?;
 

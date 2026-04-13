@@ -1,10 +1,13 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
+use serde_json::json;
 use time::Duration;
 
 use crate::{
+    audit::{self, AuditEvent},
     identity::{password, repository, session},
+    oauth,
     state::AppState,
 };
 
@@ -37,12 +40,38 @@ async fn login(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     else {
+        audit::record(
+            &state.db_pool,
+            AuditEvent {
+                actor_type: "user",
+                actor_id: None,
+                event_type: "auth.login.failed",
+                target_type: None,
+                target_id: None,
+                metadata: json!({ "username": username }),
+            },
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Err(StatusCode::UNAUTHORIZED);
     };
 
     let password_is_valid = password::verify_password(&payload.password, &credential.password_hash)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !password_is_valid {
+        audit::record(
+            &state.db_pool,
+            AuditEvent {
+                actor_type: "user",
+                actor_id: Some(credential.user_id),
+                event_type: "auth.login.failed",
+                target_type: None,
+                target_id: None,
+                metadata: json!({ "username": username }),
+            },
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -52,6 +81,20 @@ async fn login(
         credential.user_id,
         &session_token.hash,
         SESSION_TTL_SECONDS,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    audit::record(
+        &state.db_pool,
+        AuditEvent {
+            actor_type: "user",
+            actor_id: Some(credential.user_id),
+            event_type: "auth.login.succeeded",
+            target_type: None,
+            target_id: None,
+            metadata: json!({ "username": username }),
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -71,9 +114,27 @@ async fn logout(
 ) -> Result<impl IntoResponse, StatusCode> {
     if let Some(cookie) = jar.get(SESSION_COOKIE_NAME) {
         let session_token_hash = session::hash_session_token(cookie.value());
+        let actor_id = oauth::find_active_session_user_id(&state.db_pool, &session_token_hash)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         repository::revoke_session(&state.db_pool, &session_token_hash)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(actor_id) = actor_id {
+            audit::record(
+                &state.db_pool,
+                AuditEvent {
+                    actor_type: "user",
+                    actor_id: Some(actor_id),
+                    event_type: "auth.logout.succeeded",
+                    target_type: None,
+                    target_id: None,
+                    metadata: json!({}),
+                },
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
     }
 
     Ok((
