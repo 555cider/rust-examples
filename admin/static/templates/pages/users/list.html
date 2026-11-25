@@ -1,0 +1,188 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}사용자 관리{% endblock %}
+
+{% block content %}
+<div class="animate-fade-in">
+    <div class="page-header flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+            <h1 class="page-title">사용자 관리</h1>
+            <p class="page-description">시스템 사용자를 조회하고 관리합니다.</p>
+        </div>
+        <div class="flex gap-3">
+            <button onclick="openUserModal()" class="btn-primary shadow-lg shadow-primary-500/30">
+                <i class="fas fa-plus mr-2"></i> 사용자 추가
+            </button>
+        </div>
+    </div>
+
+    <!-- Search and filter -->
+    <div class="search-box">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+            <div class="md:col-span-6">
+                <label for="search" class="input-label mb-1">검색</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i class="fas fa-search text-gray-400"></i>
+                    </div>
+                    <input type="text" name="search" id="search" class="input-field pl-10"
+                        placeholder="이름, 이메일, 아이디로 검색">
+                </div>
+            </div>
+
+            <div class="md:col-span-3">
+                <label for="status" class="input-label mb-1">상태</label>
+                <select id="status" name="status" class="input-field">
+                    <option value="all">모든 상태</option>
+                    <option value="active">활성</option>
+                    <option value="inactive">비활성</option>
+                    <option value="suspended">정지됨</option>
+                </select>
+            </div>
+
+            <div class="md:col-span-3">
+                <label for="search-button" class="input-label mb-1">&nbsp;</label>
+                <button type="button" id="search-button" class="btn-secondary w-full h-[42px]">
+                    <i class="fas fa-search mr-2"></i> 검색
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Mobile Cards -->
+    <div class="block md:hidden space-y-4" id="mobile-users">
+        <!-- Dynamic content will be inserted here by JavaScript -->
+    </div>
+
+    <!-- Desktop Table -->
+    <div class="hidden md:block">
+        <div class="data-table-container">
+            <table class="data-table w-full">
+                <thead>
+                    <tr>
+                        <th>아이디</th>
+                        <th>이메일</th>
+                        <th class="text-center">역할</th>
+                        <th class="text-center">상태</th>
+                        <th class="text-center">마지막 로그인</th>
+                        <th class="text-right">관리</th>
+                    </tr>
+                </thead>
+                <tbody id="users-table-body">
+                    <!-- Dynamic content will be inserted here by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="pagination-container">
+        <!-- Dynamic pagination will be inserted here by JavaScript -->
+    </div>
+
+    <!-- User Modal -->
+    <div id="userModal" class="modal">
+        <div class="modal-backdrop" onclick="closeUserModal()"></div>
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modalTitle" class="modal-title">사용자 추가</h3>
+                    <button type="button" class="modal-close" onclick="closeUserModal()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <form id="userForm">
+                    <div class="modal-body">
+                        <input type="hidden" id="userId">
+
+                        <div class="form-group">
+                            <label for="username" class="input-label">아이디 <span class="text-error-600">*</span></label>
+                            <input type="text" id="username" name="username" required class="input-field">
+                            <span id="username-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="name" class="input-label">이름 <span class="text-error-600">*</span></label>
+                            <input type="text" id="name" name="name" required class="input-field">
+                            <span id="name-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="email" class="input-label">이메일 <span class="text-error-600">*</span></label>
+                            <input type="email" id="email" name="email" required class="input-field">
+                            <span id="email-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="phone" class="input-label">전화번호</label>
+                            <input type="tel" id="phone" name="phone" class="input-field">
+                            <span id="phone-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="roleId" class="input-label">역할 <span class="text-error-600">*</span></label>
+                            <select id="roleId" name="role_id" required class="input-field">
+                                <option value="">선택하세요</option>
+                            </select>
+                            <span id="roleId-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group" id="passwordGroup">
+                            <label for="password" class="input-label">비밀번호 <span class="text-error-600"
+                                    id="passwordRequired">*</span></label>
+                            <input type="password" id="password" name="password" class="input-field">
+                            <span id="password-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group" id="confirmPasswordGroup">
+                            <label for="confirmPassword" class="input-label">비밀번호 확인 <span class="text-error-600"
+                                    id="confirmPasswordRequired">*</span></label>
+                            <input type="password" id="confirmPassword" name="confirmPassword" class="input-field">
+                            <span id="confirmPassword-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="input-label mb-2">추가 속성 (ABAC)</label>
+                            <div id="attributes-container" class="space-y-2 mb-2">
+                                <!-- Dynamic attribute rows will be added here -->
+                            </div>
+                            <button type="button" onclick="addAttributeRow()" class="btn-secondary btn-sm w-full">
+                                <i class="fas fa-plus mr-1"></i> 속성 추가
+                            </button>
+                            <input type="hidden" id="attributes" name="attributes">
+                            <span id="attributes-error" class="input-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <div class="flex items-center">
+                                <input type="checkbox" id="isActive" name="is_active" checked class="checkbox-field">
+                                <label for="isActive" class="ml-2 text-sm text-gray-900">활성 상태</label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <div class="flex items-center">
+                                <input type="checkbox" id="forcePasswordChange" name="force_password_change"
+                                    class="checkbox-field">
+                                <label for="forcePasswordChange" class="ml-2 text-sm text-gray-900">다음 로그인 시 비밀번호 변경
+                                    강제</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn-secondary" onclick="closeUserModal()">취소</button>
+                        <button type="submit" class="btn-primary">
+                            <i class="fas fa-save mr-2"></i>
+                            <span id="submit-btn-text">추가</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/users/list.js?v=1763769000"></script>
+{% endblock %}

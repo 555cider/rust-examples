@@ -1,0 +1,64 @@
+{# Form Input Component
+   Usage:
+   {% include "components/form_input.html" with 
+      name="email"
+      label="Email Address"
+      type="text"
+      value=""
+      placeholder="Enter your email"
+      required=true
+      disabled=false
+      error="This field is required"
+      help="We'll never share your email"
+   %}
+   
+   Parameters:
+   - name: Input name attribute (required)
+   - label: Label text (optional)
+   - type: text|email|password|number|tel|url|date|time|datetime-local (default: text)
+   - value: Input value (optional)
+   - placeholder: Placeholder text (optional)
+   - required: boolean (default: false)
+   - disabled: boolean (default: false)
+   - readonly: boolean (default: false)
+   - error: Error message to display (optional)
+   - help: Help text to display (optional)
+   - class: Additional CSS classes for input (optional)
+   - min: Min value for number/date inputs (optional)
+   - max: Max value for number/date inputs (optional)
+   - pattern: Regex pattern for validation (optional)
+#}
+
+<div class="form-group">
+    {% if label %}
+        <label for="{{ name }}" class="input-label {% if required %}required{% endif %}">
+            {{ label }}
+            {% if required %}<span class="text-error-500">*</span>{% endif %}
+        </label>
+    {% endif %}
+    
+    <input 
+        type="{{ type or "text" }}"
+        id="{{ name }}"
+        name="{{ name }}"
+        class="input-field {% if error %}error{% endif %} {{ class or "" }}"
+        {% if value %}value="{{ value }}"{% endif %}
+        {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+        {% if required %}required{% endif %}
+        {% if disabled %}disabled{% endif %}
+        {% if readonly %}readonly{% endif %}
+        {% if min %}min="{{ min }}"{% endif %}
+        {% if max %}max="{{ max }}"{% endif %}
+        {% if pattern %}pattern="{{ pattern }}"{% endif %}
+    />
+    
+    {% if error %}
+        <p class="input-error">
+            <i class="fas fa-exclamation-circle mr-1"></i>{{ error }}
+        </p>
+    {% endif %}
+    
+    {% if help and not error %}
+        <p class="input-help">{{ help }}</p>
+    {% endif %}
+</div>

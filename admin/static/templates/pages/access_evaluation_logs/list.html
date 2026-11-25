@@ -1,0 +1,161 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}접근 평가 로그{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/access_evaluation_logs/list.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+    <!-- Page Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900 tracking-tight">접근 평가 로그</h1>
+            <p class="mt-1 text-sm text-gray-500">시스템의 접근 제어 평가 기록을 실시간으로 확인하고 분석합니다.</p>
+        </div>
+    </div>
+
+    <!-- Search & Filter -->
+    <div class="glass-card p-4 rounded-xl shadow-sm">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+            <div class="md:col-span-6">
+                <div class="relative group">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i
+                            class="fas fa-search text-gray-400 group-focus-within:text-primary-500 transition-colors"></i>
+                    </div>
+                    <input type="text" id="search" placeholder="리소스, 액션으로 검색..."
+                        class="block w-full pl-10 pr-3 py-2.5 border border-gray-200 rounded-lg leading-5 bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200 sm:text-sm">
+                </div>
+            </div>
+            <div class="md:col-span-2">
+                <select id="result-filter"
+                    class="block w-full pl-3 pr-10 py-2.5 text-base border border-gray-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent sm:text-sm rounded-lg bg-white transition-all duration-200">
+                    <option value="">전체 결과</option>
+                    <option value="PERMIT">허용</option>
+                    <option value="DENY">거부</option>
+                    <option value="NOT_APPLICABLE">해당없음</option>
+                </select>
+            </div>
+            <div class="md:col-span-2">
+                <select id="evaluation-type-filter"
+                    class="block w-full pl-3 pr-10 py-2.5 text-base border border-gray-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent sm:text-sm rounded-lg bg-white transition-all duration-200">
+                    <option value="">전체 평가방식</option>
+                    <option value="rbac">RBAC</option>
+                    <option value="abac">ABAC</option>
+                    <option value="hybrid">하이브리드</option>
+                </select>
+            </div>
+            <div class="md:col-span-2">
+                <button id="search-button"
+                    class="w-full flex items-center justify-center px-4 py-2.5 border border-transparent text-sm font-medium rounded-lg text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-all duration-200 shadow-sm hover:shadow">
+                    <i class="fas fa-search mr-2"></i>
+                    검색
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Table -->
+    <div class="glass-card rounded-xl shadow-sm overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50/50">
+                    <tr>
+                        <th scope="col"
+                            class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">시간
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">사용자
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">리소스
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">액션
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">결과
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">평가
+                            방식
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">평가
+                            시간
+                        </th>
+                        <th scope="col"
+                            class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">작업
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="access-logs-table-body" class="bg-white divide-y divide-gray-200">
+                    <tr>
+                        <td colspan="8" class="px-6 py-10 text-center text-gray-500">
+                            <div class="flex flex-col items-center justify-center">
+                                <i class="fas fa-spinner fa-spin text-3xl text-primary-500 mb-3"></i>
+                                <p>데이터를 불러오는 중...</p>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination -->
+        <div class="bg-gray-50/50 px-4 py-3 border-t border-gray-200 sm:px-6 flex items-center justify-between">
+            <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                <div>
+                    <p class="text-sm text-gray-700" id="pagination-info">
+                        검색 결과 없음
+                    </p>
+                </div>
+                <div>
+                    <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination"
+                        id="pagination-buttons">
+                        <!-- Buttons will be inserted here -->
+                    </nav>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Log Detail Modal -->
+<div id="logDetailModal" class="fixed inset-0 z-50 hidden overflow-y-auto" aria-labelledby="modal-title" role="dialog"
+    aria-modal="true">
+    <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity backdrop-blur-sm" aria-hidden="true"
+            onclick="closeLogDetailModal()"></div>
+        <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+        <div
+            class="inline-block align-bottom bg-white rounded-2xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-3xl sm:w-full">
+            <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                <div class="flex justify-between items-start mb-5">
+                    <h3 class="text-xl font-bold text-gray-900" id="logDetailModalTitle">
+                        로그 상세 정보
+                    </h3>
+                    <button type="button"
+                        class="bg-white rounded-md text-gray-400 hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+                        onclick="closeLogDetailModal()">
+                        <span class="sr-only">닫기</span>
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                <div class="mt-2" id="log-detail-content">
+                    <!-- Dynamic content will be inserted here -->
+                </div>
+            </div>
+            <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                <button type="button"
+                    class="w-full inline-flex justify-center rounded-lg border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm transition-colors"
+                    onclick="closeLogDetailModal()">
+                    닫기
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

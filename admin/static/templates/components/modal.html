@@ -1,0 +1,30 @@
+<!-- Reusable Modal Component -->
+<div id="{{ modal_id }}" class="modal">
+    <div class="modal-backdrop" onclick="close{{ modal_id }}()"></div>
+    <div class="modal-dialog" style="{% if modal_size == 'large' %}max-width: 800px;{% elif modal_size == 'small' %}max-width: 400px;{% else %}max-width: 600px;{% endif %}">
+        <div class="modal-header">
+            <h3 id="{{ modal_id }}Title" class="text-lg font-semibold text-gray-900">{{ modal_title }}</h3>
+            <button type="button" onclick="close{{ modal_id }}()" class="close-button">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+
+        <form id="{{ modal_id }}Form">
+            <div class="modal-body">
+                {% block modal_body %}
+                <!-- Modal body content goes here -->
+                {% endblock %}
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" onclick="close{{ modal_id }}()" class="btn-secondary">
+                    취소
+                </button>
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-save mr-2"></i>
+                    저장
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
