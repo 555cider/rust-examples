@@ -1,0 +1,22 @@
+server:
+  listen: 127.0.0.1:8080
+  discovery:
+    refresh_ms: 5000
+    eureka:
+      service_url: http://127.0.0.1:8761/eureka/v2/apps
+      username: admin
+      password: secret
+      prefer_ip_address: true
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: inventory
+          uri: lb://inventory
+          predicates:
+            - Path=/inventory/**
+          metadata:
+            scheme: https
+            protocol: h2
+            timeoutMs: 5000

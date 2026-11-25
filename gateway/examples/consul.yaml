@@ -1,0 +1,22 @@
+server:
+  listen: 127.0.0.1:8080
+  discovery:
+    refresh_ms: 5000
+    consul:
+      address: http://127.0.0.1:8500
+      token: your-consul-token
+      passing_only: true
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: products
+          uri: lb://products
+          predicates:
+            - Path=/products/**
+          metadata:
+            timeoutMs: 3000
+            retryAttempts: 1
+            retryStatuses: 502,504
+            retryBackoffMs: 100

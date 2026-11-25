@@ -1,0 +1,23 @@
+server:
+  listen: 127.0.0.1:8080
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: users
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/users/**
+
+        - id: products
+          uri: http://127.0.0.1:8002
+          predicates:
+            - Path=/products/**
+          filters:
+            - StripPrefix=1
+
+        - id: fallback
+          uri: http://127.0.0.1:8001
+          predicates:
+            - Path=/**
