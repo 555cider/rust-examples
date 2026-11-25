@@ -24,8 +24,7 @@ pub async fn connect(
         } else {
             authority.clone()
         };
-    let selected_addr = select_connect_socket_addr(&resolved_authority).await?;
-    let stream = tokio::net::TcpStream::connect(selected_addr).await?;
+    let stream = connect_resolved(&resolved_authority).await?;
 
     if matches!(route.protocol, config::Protocol::H2) && route.scheme != "https" {
         return Err(entity::GatewayError::InvalidRouteConfig(
@@ -45,15 +44,25 @@ pub async fn connect(
     }
 }
 
-async fn select_connect_socket_addr(
+/// Connects to the round-robin pick first, then falls back to the other resolved
+/// addresses (e.g. `localhost` resolving to `::1` while the upstream listens on IPv4 only).
+async fn connect_resolved(
     authority: &config::Authority,
-) -> Result<SocketAddr, entity::GatewayError> {
+) -> Result<tokio::net::TcpStream, entity::GatewayError> {
     let resolved = resolve_socket_addrs(authority).await?;
-    select_resolved_address(authority, &resolved).ok_or_else(|| {
-        entity::GatewayError::InvalidRouteConfig(format!(
+    let mut last_error = None;
+    for addr in connection_order(authority, &resolved) {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(match last_error {
+        Some(err) => err.into(),
+        None => entity::GatewayError::InvalidRouteConfig(format!(
             "no socket addresses resolved for authority '{}:{}'",
             authority.host, authority.port
-        ))
+        )),
     })
 }
 
@@ -83,16 +92,25 @@ async fn resolve_socket_addrs(
     Ok(resolved)
 }
 
+fn connection_order(authority: &config::Authority, resolved: &[SocketAddr]) -> Vec<SocketAddr> {
+    if resolved.is_empty() {
+        return Vec::new();
+    }
+
+    let start = next_resolved_cursor(authority_balance_key(authority)) % resolved.len();
+    resolved[start..]
+        .iter()
+        .chain(&resolved[..start])
+        .copied()
+        .collect()
+}
+
+#[cfg(test)]
 fn select_resolved_address(
     authority: &config::Authority,
     resolved: &[SocketAddr],
 ) -> Option<SocketAddr> {
-    if resolved.is_empty() {
-        return None;
-    }
-
-    let selected = next_resolved_cursor(authority_balance_key(authority)) % resolved.len();
-    resolved.get(selected).copied()
+    connection_order(authority, resolved).first().copied()
 }
 
 fn authority_balance_key(authority: &config::Authority) -> String {

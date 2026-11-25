@@ -79,8 +79,8 @@ Modern admin server with hybrid access control (RBAC + ABAC) built with Rust, Ax
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
-   cd rust-admin-server-dev
+   git clone https://github.com/555cider/rust-examples.git
+   cd rust-examples/admin
    ```
 
 2. **Setup environment**
@@ -90,7 +90,11 @@ Modern admin server with hybrid access control (RBAC + ABAC) built with Rust, Ax
    ```
 
 3. **Run database migrations**
+
+   SQLx checks queries against `DATABASE_URL` at compile time, so the database must exist before `cargo build`.
    ```bash
+   mkdir -p data
+   sqlx database create
    sqlx migrate run
    # Note: This applies the consolidated schema migration.
    ```
@@ -190,7 +194,7 @@ GET    /api/access-logs         # Access evaluation logs
 ## 📁 Project Structure
 
 ```
-rust-admin-server-dev/
+admin/
 ├── src/
 │   ├── main.rs                  # Application entry point
 │   ├── config/                  # Configuration modules

@@ -33,3 +33,5 @@ package-lock.json
 # OS Generated
 .DS_Store
 Thumbs.db
+
+!.env.example

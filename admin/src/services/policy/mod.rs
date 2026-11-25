@@ -12,6 +12,7 @@
 //! use admin_server::services::policy::{PolicyUpdateManager, initialize_policy_listeners};
 //! use std::sync::Arc;
 //!
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create policy update manager
 //! let manager = Arc::new(PolicyUpdateManager::default());
 //!
@@ -20,6 +21,8 @@
 //!
 //! // Notify policy changes
 //! manager.notify_policy_updated("policy1".to_string(), "Updated Policy".to_string()).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod listeners;

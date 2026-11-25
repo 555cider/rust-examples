@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 /// use axum::{routing::get, Router};
 /// use admin_server::middleware::log;
 ///
-/// let app = Router::new()
+/// let app: Router = Router::new()
 ///     .route("/", get(|| async { "Hello, World!" }))
 ///     .layer(axum::middleware::from_fn(log));
 /// ```

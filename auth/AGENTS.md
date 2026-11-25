@@ -2,7 +2,7 @@
 
 ## Repository Intent
 
-This repository is the standalone home for the new auth server. Do not treat it as an extension of `rust-examples`.
+`auth/` is the auth server of `rust-examples`. It is a standalone crate: do not share code with `admin/` (the older admin dashboard example).
 
 ## First Read
 
